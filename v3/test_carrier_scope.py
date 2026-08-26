@@ -175,6 +175,28 @@ for scope, expect_single in (('sector', True), ('carrier', False)):
           f"({r2['summary']['collision_count']})")
 
 # ============================================================
+print("\n=== 7. app.py'deki her detect_* cagrisi carrier_map gecmeli ===")
+# Bu, gercekten yasanan bir hatanin nobetcisi: plan ONCESI skor
+# run_full_analysis'ten (kapsamli) gelirken, plan SONRASI skor app.py'deki
+# yeniden-tespit cagrilarindan (kapsamsiz) geliyordu.  Sayilar 2.5x sisip
+# skor cakiliyordu — plan degil, karsilastirma bozuktu.
+import os
+import re
+
+_app = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')
+_pat = re.compile(r'detect_(?:collisions|confusions|mod3_conflicts|mod4_conflicts|'
+                  r'mod6_conflicts|mod30_conflicts|rsi_collisions)\(')
+_missing = []
+with open(_app, encoding='utf-8') as fh:
+    for i, line in enumerate(fh, 1):
+        if _pat.search(line) and 'carrier_map' not in line and 'import' not in line:
+            _missing.append((i, line.strip()[:80]))
+check(not _missing,
+      f"app.py'de carrier_map gecmeyen detect_* cagrisi yok ({len(_missing)} bulundu)")
+for i, l in _missing[:5]:
+    print(f"       satir {i}: {l}")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")

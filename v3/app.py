@@ -435,14 +435,15 @@ with tab2:
                         df_tmp.at[idx, 'rsi'] = rval
 
             _na = results.get('neighbor_attempts', {})
+            _cm = results.get('carrier_map')   # K-1: ayni kapsam, yoksa karsilastirma anlamsiz
             _lac = _build_loc_az_maps(df_tmp)
-            _col = detect_collisions(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac)
-            _con = detect_confusions(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac)
-            _m3 = detect_mod3_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac) if check_mod3 else pd.DataFrame()
-            _m4 = detect_mod4_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac) if check_mod4 else pd.DataFrame()
-            _m6 = detect_mod6_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac) if check_mod6 else pd.DataFrame()
-            _m30 = detect_mod30_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac) if check_mod30 else pd.DataFrame()
-            _rsi = detect_rsi_collisions(df_tmp, nb, 'rsi', s['technology'], cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac) if (check_rsi and 'rsi' in df_tmp.columns) else pd.DataFrame()
+            _col = detect_collisions(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm)
+            _con = detect_confusions(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm)
+            _m3 = detect_mod3_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm) if check_mod3 else pd.DataFrame()
+            _m4 = detect_mod4_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm) if check_mod4 else pd.DataFrame()
+            _m6 = detect_mod6_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm) if check_mod6 else pd.DataFrame()
+            _m30 = detect_mod30_conflicts(df_tmp, nb, cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm) if check_mod30 else pd.DataFrame()
+            _rsi = detect_rsi_collisions(df_tmp, nb, 'rsi', s['technology'], cell_to_sector=c2s, nbr_attempts=_na, _loc_az_cache=_lac, carrier_map=_cm) if (check_rsi and 'rsi' in df_tmp.columns) else pd.DataFrame()
             hs = compute_health_score(len(_col), len(_con), len(_m3), len(_m6), len(_m30), len(_rsi), tn,
                                       n_cells=len(df_tmp), m4_count=len(_m4), technology=s['technology'])
             # Co-site counting
@@ -1014,13 +1015,14 @@ with tab3:
                                 ix = _cid_idx.get(str(cid))
                                 if ix is not None:
                                     df_eff.at[ix, 'rsi'] = rval
-                        _conflict_tables_data['Collision'] = detect_collisions(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na)
-                        _conflict_tables_data['Confusion'] = detect_confusions(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na)
-                        _conflict_tables_data['Mod3'] = detect_mod3_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na)
-                        _conflict_tables_data['Mod4'] = detect_mod4_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na)
-                        _conflict_tables_data['Mod6'] = detect_mod6_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na)
-                        _conflict_tables_data['Mod30'] = detect_mod30_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na)
-                        _conflict_tables_data['RSI'] = detect_rsi_collisions(df_eff, nb, 'rsi', tech, cell_to_sector=c2s, nbr_attempts=_na) if 'rsi' in df_eff.columns else pd.DataFrame()
+                        _cm = results.get('carrier_map')
+                        _conflict_tables_data['Collision'] = detect_collisions(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm)
+                        _conflict_tables_data['Confusion'] = detect_confusions(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm)
+                        _conflict_tables_data['Mod3'] = detect_mod3_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm)
+                        _conflict_tables_data['Mod4'] = detect_mod4_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm)
+                        _conflict_tables_data['Mod6'] = detect_mod6_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm)
+                        _conflict_tables_data['Mod30'] = detect_mod30_conflicts(df_eff, nb, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm)
+                        _conflict_tables_data['RSI'] = detect_rsi_collisions(df_eff, nb, 'rsi', tech, cell_to_sector=c2s, nbr_attempts=_na, carrier_map=_cm) if 'rsi' in df_eff.columns else pd.DataFrame()
                     else:
                         # Mevcut: use existing results
                         _key_map = {'Collision':'collisions','Confusion':'confusions',
@@ -1696,16 +1698,17 @@ with tab4:
                 nb = results['neighbors']
                 c2s = st.session_state.cell_to_sector or {}
                 _na_rpt = results.get('neighbor_attempts', {})
+                _cm = results.get('carrier_map')   # K-1: plan oncesi/sonrasi ayni kapsamda olmali
                 _lac_rpt = _build_loc_az_maps(_df_plan)
 
                 # Detect conflicts for planned state
-                _plan_col = detect_collisions(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt)
-                _plan_con = detect_confusions(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt)
-                _plan_m3 = detect_mod3_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt) if check_mod3 else pd.DataFrame()
-                _plan_m4 = detect_mod4_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt) if check_mod4 else pd.DataFrame()
-                _plan_m6 = detect_mod6_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt) if check_mod6 else pd.DataFrame()
-                _plan_m30 = detect_mod30_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt) if check_mod30 else pd.DataFrame()
-                _plan_rsi = detect_rsi_collisions(_df_plan, nb, 'rsi', _tech_rpt, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt) if (check_rsi and 'rsi' in _df_plan.columns) else pd.DataFrame()
+                _plan_col = detect_collisions(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm)
+                _plan_con = detect_confusions(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm)
+                _plan_m3 = detect_mod3_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm) if check_mod3 else pd.DataFrame()
+                _plan_m4 = detect_mod4_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm) if check_mod4 else pd.DataFrame()
+                _plan_m6 = detect_mod6_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm) if check_mod6 else pd.DataFrame()
+                _plan_m30 = detect_mod30_conflicts(_df_plan, nb, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm) if check_mod30 else pd.DataFrame()
+                _plan_rsi = detect_rsi_collisions(_df_plan, nb, 'rsi', _tech_rpt, cell_to_sector=c2s, nbr_attempts=_na_rpt, _loc_az_cache=_lac_rpt, carrier_map=_cm) if (check_rsi and 'rsi' in _df_plan.columns) else pd.DataFrame()
 
                 st.session_state._plan_detail_cache = {
                     '_key': _detail_cache_key,
