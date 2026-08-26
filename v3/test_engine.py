@@ -21,15 +21,18 @@ def main():
     assert get_ncs(0, 'LTE') == 0, "Ncs(0) should be 0"
     assert get_ncs(5, 'LTE') == 26, f"Ncs(5)={get_ncs(5,'LTE')}, expected 26"
     assert get_ncs(15, 'LTE') == 419, f"Ncs(15)={get_ncs(15,'LTE')}, expected 419"
-    # FDD, TS 36.211 Table 5.7.1-2: 0-15→0, 16-31→1, 32-47→2, 48-63→3.
-    # v2 asserted get_lte_preamble_format(60) == 4 — that was the K-3 bug being
-    # locked in by its own test.  Format 4 does not exist in FDD; it lives in
-    # the TDD table at indices 48-57, where 58-63 are N/A.
+    # FDD, TS 36.211 Table 5.7.1-2: 0-15→0, 16-31→1, 32-47→2, 48-63→3,
+    # with 30, 46, 60, 61, 62 unassigned (N/A).  v2 asserted
+    # get_lte_preamble_format(60) == 4 — the K-3 bug locked in by its own test.
+    # Format 4 does not exist in FDD; it lives in the TDD table (5.7.1-3) at
+    # 48-57, where 58-63 are N/A.
     assert get_lte_preamble_format(0) == 0
     assert get_lte_preamble_format(20) == 1
     assert get_lte_preamble_format(40) == 2
     assert get_lte_preamble_format(50) == 3
-    assert get_lte_preamble_format(60) == 3, "FDD'de format 4 yok"
+    assert get_lte_preamble_format(63) == 3, "FDD'de format 4 yok"
+    assert get_lte_preamble_format(60) is None, "FDD cfg=60 atanmamis"
+    assert get_lte_preamble_format(30) is None, "FDD cfg=30 atanmamis"
     assert get_lte_preamble_format(50, 'TDD') == 4
     assert get_lte_preamble_format(60, 'TDD') is None, "TDD'de 58-63 N/A"
     print("✅ 3GPP table spot-checks passed")

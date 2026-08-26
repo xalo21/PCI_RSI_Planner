@@ -91,12 +91,22 @@ for zcz, exp in enumerate(EXPECTED_LTE_UNRESTRICTED):
     spec(g1, E.get_ncs(zcz, 'LTE', restricted=False) == exp,
          f"zcz={zcz}: {E.get_ncs(zcz,'LTE')} != {exp}")
 
-g2 = group('LTE Ncs — restricted set A (T5.7.2-2)')
-EXPECTED_LTE_RESTRICTED = [15, 18, 22, 26, 32, 38, 46, 59, 76, 93, 119, 167,
-                           279, 419, 839]
-for zcz, exp in enumerate(EXPECTED_LTE_RESTRICTED):
+g2 = group('LTE Ncs — restricted set A/B (T5.7.2-2)')
+# DIKKAT: bu testin ilk hali YANLISTI — kisitsiz sutunun bir kaydirilmisi
+# (59, 76, 93, 119, 167, 279, 419, 839) yazilmisti ve kod da ayni hatayi
+# tasidigi icin test geciyordu. Asagidaki degerler spec metninden cikarildi.
+EXPECTED_LTE_RESTRICTED_A = [15, 18, 22, 26, 32, 38, 46, 55, 68, 82, 100, 128,
+                             158, 202, 237]          # zcz=15 N/A
+EXPECTED_LTE_RESTRICTED_B = [15, 18, 22, 26, 32, 38, 46, 55, 68, 82, 100, 118,
+                             137]                    # zcz>=13 N/A
+for zcz, exp in enumerate(EXPECTED_LTE_RESTRICTED_A):
     spec(g2, E.get_ncs(zcz, 'LTE', restricted=True) == exp,
-         f"zcz={zcz}: {E.get_ncs(zcz,'LTE',restricted=True)} != {exp}")
+         f"tipA zcz={zcz}: {E.get_ncs(zcz,'LTE',restricted=True)} != {exp}")
+spec(g2, E.get_ncs(15, 'LTE', restricted=True) == 0, "tipA zcz=15 N/A olmali")
+for zcz, exp in enumerate(EXPECTED_LTE_RESTRICTED_B):
+    spec(g2, E.get_ncs(zcz, 'LTE', restricted='typeB') == exp,
+         f"tipB zcz={zcz}: {E.get_ncs(zcz,'LTE',restricted='typeB')} != {exp}")
+spec(g2, E.get_ncs(13, 'LTE', restricted='typeB') == 0, "tipB zcz=13 N/A olmali")
 
 g3 = group('NR Ncs — L_RA=839 (T6.3.3.1-5)')
 for zcz, exp in enumerate(EXPECTED_LTE_UNRESTRICTED):   # NR uzun dizi ile ayni
@@ -120,15 +130,12 @@ spec(g5, E.get_ncs(7, 'LTE', short=True) == 0,
 
 # ============================================================
 g6 = group('LTE PRACH config index -> format, FDD (T5.7.1-2)')
-for ci in range(0, 16):
-    spec(g6, E.get_lte_preamble_format(ci) == 0, f"cfg={ci} -> format 0 olmali")
-for ci in range(16, 32):
-    spec(g6, E.get_lte_preamble_format(ci) == 1, f"cfg={ci} -> format 1 olmali")
-for ci in range(32, 48):
-    spec(g6, E.get_lte_preamble_format(ci) == 2, f"cfg={ci} -> format 2 olmali")
-for ci in range(48, 64):
-    got = E.get_lte_preamble_format(ci)
-    spec(g6, got == 3, f"cfg={ci} -> format 3 olmali (FDD'de format 4 YOK), {got} dondu")
+_FDD_NA = {30, 46, 60, 61, 62}          # T5.7.1-2'de atanmamis indeksler
+for lo, hi, fmt in ((0, 15, 0), (16, 31, 1), (32, 47, 2), (48, 63, 3)):
+    for ci in range(lo, hi + 1):
+        got = E.get_lte_preamble_format(ci)
+        exp = None if ci in _FDD_NA else fmt
+        spec(g6, got == exp, f"cfg={ci} -> {exp} olmali, {got} dondu")
 
 g6b = group('LTE PRACH config index -> format, TDD (T5.7.1-4)')
 for ci in range(48, 58):
@@ -182,6 +189,8 @@ if hasattr(E, 'preambles_per_root_restricted'):
             spec(g8, got == exp, f"u={u}, Ncs={ncs}: {got} != {exp}")
     spec(g8, E.root_cyclic_shift(129) == 13 and E.root_cyclic_shift(710) == 13,
          "d_u(129) ve d_u(710) = 13 (T5.7.2-4'un ilk iki girdisi)")
+    spec(g8, E.get_ncs(8, 'LTE', restricted=True) == 68,
+         "kisitli tabloya karsi capraz kontrol")
     # Kisitli kume unrestricted'dan DAIMA daha cok kok ister
     for ncs in (15, 32, 76):
         b, t, w = E.restricted_roots_bounds(ncs)
@@ -198,11 +207,30 @@ if hasattr(E, 'roots_needed_for_cell'):
          "kok sirasi yuklu degilken kisitli kok sayisi None donmeli "
          "(unrestricted degeri UYDURULMAMALI)")
 
-g8b = group('Kisitli kume — tam cozum icin kok sirasi tablosu',
-            expect_fail=True, finding='K-2 / tablo bekleniyor')
-spec(g8b, E.has_root_order(NZC),
-     "TS 36.211 T5.7.2-4 (mantiksal->fiziksel kok sirasi) yuklenmemis; "
-     "kisitli kume kok sayisi ancak medyan tahminle veriliyor")
+g8b = group('Kok sirasi tablolari (T5.7.2-4 / T5.7.2-5)')
+spec(g8b, E.has_root_order(NZC) and E.has_root_order(139),
+     "kok sirasi tablolari yuklenmemis")
+from prach_tables import ROOT_ORDER_839, ROOT_ORDER_139
+for name, order, nzc in (('T5.7.2-4', ROOT_ORDER_839, 839),
+                         ('T5.7.2-5', ROOT_ORDER_139, 139)):
+    spec(g8b, len(order) == nzc - 1, f"{name}: {nzc-1} girdi olmali, {len(order)} var")
+    spec(g8b, len(set(order)) == len(order), f"{name}: tekrar eden kok var")
+    spec(g8b, all(1 <= u < nzc for u in order), f"{name}: aralik disi deger")
+    # yapisal degismez: kokler (u, N_ZC-u) ciftleri halinde
+    spec(g8b, all(order[i] + order[i+1] == nzc for i in range(0, len(order)-1, 2)),
+         f"{name}: cift toplamlari {nzc} degil")
+spec(g8b, ROOT_ORDER_839[:6] == (129, 710, 140, 699, 120, 719),
+     "T5.7.2-4 ilk 6 girdi spec ile uyusmuyor")
+spec(g8b, ROOT_ORDER_139[:6] == (1, 138, 2, 137, 3, 136),
+     "T5.7.2-5 ilk 6 girdi spec ile uyusmuyor")
+# Kisitli kok sayisi artik KESIN ve baslangic indeksine bagli
+_r0 = E.roots_needed_for_cell(0, 68, restricted=True)
+_r400 = E.roots_needed_for_cell(400, 68, restricted=True)
+spec(g8b, _r0 is not None and _r400 is not None, "kisitli kok sayisi cozulmeli")
+spec(g8b, _r0 != _r400,
+     f"kisitli kok sayisi baslangica gore degismeli ({_r0} vs {_r400})")
+spec(g8b, min(_r0, _r400) > E.roots_needed(64, 68),
+     "kisitli kok sayisi unrestricted'dan buyuk olmali")
 
 # ============================================================
 g9 = group('PCI / RSI / PRACH config araliklari')

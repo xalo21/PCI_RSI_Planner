@@ -346,15 +346,27 @@ LTE_NCS_UNRESTRICTED = {
     0:0, 1:13, 2:15, 3:18, 4:22, 5:26, 6:32, 7:38,
     8:46, 9:59, 10:76, 11:93, 12:119, 13:167, 14:279, 15:419}
 
-# 3GPP TS 36.211 Table 5.7.2-2 – Ncs RESTRICTED set (type A), formats 0-3
-LTE_NCS_RESTRICTED = {
-    0:15, 1:18, 2:22, 3:26, 4:32, 5:38, 6:46, 7:59,
-    8:76, 9:93, 10:119, 11:167, 12:279, 13:419, 14:839}
+# Tables below come from prach_tables.py, extracted from the spec text and
+# structurally validated — not typed in from memory.  The v2 restricted-set
+# table was the unrestricted column shifted by one from zcz=7 up (59, 76, 93,
+# 119, 167, 279, 419, 839 instead of 55, 68, 82, 100, 128, 158, 202, 237),
+# and the test suite had the same wrong values, so it passed.
+from prach_tables import (
+    LTE_PRACH_FORMAT_FDD, LTE_PRACH_FORMAT_TDD,
+    LTE_NCS_RESTRICTED_A_SPEC, LTE_NCS_RESTRICTED_B_SPEC,
+    LTE_NCS_FORMAT4_SPEC, ROOT_ORDER_839, ROOT_ORDER_139,
+)
+
+def _clean(d):
+    """Drop N/A entries so a lookup miss returns 0 (= not configurable)."""
+    return {k: v for k, v in d.items() if v is not None}
+
+# 3GPP TS 36.211 Table 5.7.2-2 – Ncs RESTRICTED set, formats 0-3
+LTE_NCS_RESTRICTED = _clean(LTE_NCS_RESTRICTED_A_SPEC)      # type A
+LTE_NCS_RESTRICTED_B = _clean(LTE_NCS_RESTRICTED_B_SPEC)    # type B (Rel-13+)
 
 # 3GPP TS 36.211 Table 5.7.2-3 – Ncs for PREAMBLE FORMAT 4 (TDD only, L_RA=139)
-# zeroCorrelationZoneConfig 7-15 are N/A for this format.
-LTE_NCS_FORMAT4 = {
-    0:2, 1:4, 2:6, 3:8, 4:10, 5:12, 6:15}
+LTE_NCS_FORMAT4 = _clean(LTE_NCS_FORMAT4_SPEC)
 
 # 3GPP TS 36.211 Table 5.7.1-1 – Preamble Format params
 LTE_PREAMBLE_FORMATS = {
@@ -1201,19 +1213,9 @@ def get_lte_preamble_format(config_index, duplex='FDD'):
         to be exact for a purpose other than L_RA, check them against the spec.
     """
     ci = int(config_index) if not pd.isna(config_index) else 0
-    if str(duplex).strip().upper().startswith('T'):
-        if ci <= 19: return 0
-        if ci <= 29: return 1
-        if ci <= 39: return 2
-        if ci <= 47: return 3
-        if ci <= 57: return 4
-        return None                     # 58-63: N/A in TDD
-    # FDD
-    if ci <= 15: return 0
-    if ci <= 31: return 1
-    if ci <= 47: return 2
-    if ci <= 63: return 3
-    return None
+    tbl = (LTE_PRACH_FORMAT_TDD if str(duplex).strip().upper().startswith('T')
+           else LTE_PRACH_FORMAT_FDD)
+    return tbl.get(ci)          # None = N/A for this duplex mode
 
 # ============================================================
 # Geo utilities
@@ -1259,7 +1261,11 @@ def get_ncs(zcz, technology='LTE', restricted=False, short=False):
         return (NR_NCS_SHORT if short else NR_NCS_LONG).get(cfg, 0)
     if short:
         return LTE_NCS_FORMAT4.get(cfg, 0)      # 0 == N/A for zcz >= 7
-    return (LTE_NCS_RESTRICTED if restricted else LTE_NCS_UNRESTRICTED).get(cfg, 0)
+    if restricted:
+        tbl = (LTE_NCS_RESTRICTED_B if str(restricted).upper().endswith('B')
+               else LTE_NCS_RESTRICTED)
+        return tbl.get(cfg, 0)
+    return LTE_NCS_UNRESTRICTED.get(cfg, 0)
 
 def cell_range_from_ncs(ncs, nzc=NZC_LONG, tseq_us=800.0):
     if ncs == 0: return 0.0
@@ -1362,6 +1368,14 @@ def set_root_order(order, nzc=NZC_LONG):
 
 def has_root_order(nzc=NZC_LONG):
     return nzc in ROOT_ORDER
+
+
+# Install the spec tables at import: TS 36.211 Table 5.7.2-4 (L_RA=839,
+# preamble formats 0-3) and Table 5.7.2-5 (L_RA=139, format 4).  With these
+# present the restricted-set root demand is resolved exactly instead of being
+# estimated from the median per-root yield.
+set_root_order(ROOT_ORDER_839, NZC_LONG)
+set_root_order(ROOT_ORDER_139, NZC_SHORT)
 
 
 def roots_needed_for_cell(rsi_start, ncs, nzc=NZC_LONG, restricted=False,
