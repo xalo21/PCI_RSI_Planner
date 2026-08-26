@@ -197,6 +197,41 @@ for i, l in _missing[:5]:
     print(f"       satir {i}: {l}")
 
 # ============================================================
+print("\n=== 8. Komsuluk izgarasi hicbir cifti kacirmamali (Y-1) ===")
+# Mekansal kova her iki yonde de en az yaricap kadar genis olmali. Bir boylam
+# derecesi 111*cos(lat) km oldugu icin sabit 111 kullanmak dogu-bati yonunde
+# cift kaciriyordu — Samsun verisinde 3 km'de 829 cift (%3.4).
+import itertools as _it
+
+import numpy as _np
+
+from pci_engine import (find_neighbors as _fn, haversine_distance as _hd,
+                        is_in_antenna_coverage as _cov)
+
+for _lat0, _label in ((37.8, 'Burdur ~37.8N'), (41.3, 'Samsun ~41.3N'),
+                      (60.0, 'yuksek enlem 60N')):
+    _rng = _np.random.default_rng(3)
+    _n = 220
+    _la = _lat0 + _rng.random(_n) * 0.20
+    _lo = 30.0 + _rng.random(_n) * 0.20
+    _az = _rng.integers(0, 360, _n).astype(float)
+    _d = pd.DataFrame({'cell_id': [f'G{i}' for i in range(_n)],
+                       'latitude': _la, 'longitude': _lo,
+                       'azimuth': _az, 'beamwidth': [65.0] * _n})
+    for _R in (1.0, 3.0):
+        _brute = set()
+        for _i, _j in _it.combinations(range(_n), 2):
+            if _hd(_la[_i], _lo[_i], _la[_j], _lo[_j]) <= _R:
+                if (_cov(_la[_i], _lo[_i], _az[_i], 65.0, _la[_j], _lo[_j]) or
+                        _cov(_la[_j], _lo[_j], _az[_j], 65.0, _la[_i], _lo[_i])):
+                    _brute.add(tuple(sorted((f'G{_i}', f'G{_j}'))))
+        _nb, _, _ = _fn(_d, _R, True, 65.0, False, None)
+        _got = {tuple(sorted((str(c), str(x)))) for c, nbs in _nb.items() for x in nbs}
+        _miss = _brute - _got
+        check(not _miss,
+              f"{_label}, R={_R} km: {len(_brute)} ciftin {len(_miss)}'i kaciyor")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")

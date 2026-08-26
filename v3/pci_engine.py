@@ -1722,14 +1722,22 @@ def find_neighbors(df, radius_km, use_antenna=True, default_bw=65.0,
     bws = df['beamwidth'].fillna(default_bw).values if 'beamwidth' in df.columns else np.full(n, default_bw)
 
     # --- Method 1: Distance + Antenna (spatial-bucket accelerated) ---
-    # Convert radius to approximate degree bucket size.
-    # 1° latitude ≈ 111 km. Use bucket = radius_km / 111 so that
-    # neighbours can only be in the same or adjacent grid cells.
+    # Buckets must be at least radius_km wide in BOTH directions, otherwise a
+    # pair inside the radius can land two buckets apart and never be compared.
+    # A degree of latitude is ~111 km everywhere, but a degree of longitude is
+    # 111·cos(lat) — 87.7 km at Samsun's latitude.  Sizing the longitude bucket
+    # as radius/111 made it only 79 % as wide as it needed to be, and 3.4 % of
+    # the true within-radius pairs were silently dropped, all of them
+    # east-west.  A missed pair is worse than a mis-scored one: the tool
+    # neither reports its conflicts nor plans around it.
     _bucket_deg = max(radius_km / 111.0, 0.001)
+    _mean_lat = float(np.nanmean(lats)) if n else 0.0
+    _cos_lat = max(cos(radians(_mean_lat)), 0.15)   # guard near the poles
+    _bucket_lon_deg = max(radius_km / (111.0 * _cos_lat), 0.001)
     _grid: dict = defaultdict(list)  # (brow, bcol) → [cell_index]
     for i in range(n):
         brow = int(lats[i] / _bucket_deg)
-        bcol = int(lons[i] / _bucket_deg)
+        bcol = int(lons[i] / _bucket_lon_deg)
         _grid[(brow, bcol)].append(i)
 
     _checked: set = set()  # avoid double-checking pairs
