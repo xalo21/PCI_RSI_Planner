@@ -38,7 +38,8 @@ from pci_engine import (
     LTE_PREAMBLE_FORMATS, NR_PREAMBLE_FORMATS, NR_NCS_LONG, NR_NCS_SHORT,
 )
 from data_handler import (
-    read_excel_file, generate_sample_excel, export_results_to_excel
+    read_excel_file, generate_sample_excel, export_results_to_excel,
+    summarize_external_neighbors
 )
 
 # ============================================================
@@ -130,11 +131,43 @@ with st.sidebar:
         try:
             ext_df = _read_external_neighbors(nbr_upload.getvalue())
             st.session_state.external_neighbors = ext_df
-            _att_count = sum(1 for c in ext_df.columns if str(c).strip().lower() in
-                            ('attempts','attempt','ho_attempts','ho_attempt','handover',
-                             'handovers','ho_count','ho','att','deneme','girisim','sayi'))
-            _att_msg = f" (HO attempt sütunu algılandı ✅)" if _att_count > 0 else ""
-            st.success(f"✅ {len(ext_df)} komşuluk ilişkisi yüklendi{_att_msg}")
+            # Report what actually reaches the analysis, not the raw row count:
+            # a handover export carries both directions, duplicates, and rows
+            # for cells that are not in the cell file.
+            _valid = (set(st.session_state.df['cell_id'].astype(str))
+                      if st.session_state.df is not None else None)
+            _q = summarize_external_neighbors(ext_df, _valid)
+            if not _q['parsed']:
+                st.error("❌ Komşuluk sütunları tanınmadı. Beklenen: "
+                         "`cell_1`/`cell_2` (veya source/target, hucre_1/hucre_2).")
+            else:
+                st.success(f"✅ **{_q['pairs']:,}** benzersiz komşuluk çifti "
+                           f"({_q['rows']:,} satırdan)")
+                _notes = []
+                if _q['both_directions']:
+                    _notes.append(f"{_q['both_directions']:,} çift iki yönlü kayıtlı")
+                if _q['duplicates']:
+                    _notes.append(f"{_q['duplicates']:,} tekrar eden satır")
+                if _q['self_pairs']:
+                    _notes.append(f"{_q['self_pairs']:,} kendine komşu satır atıldı")
+                if _notes:
+                    st.caption("ℹ️ " + " · ".join(_notes))
+                if _valid is None:
+                    st.caption("ℹ️ Hücre verisi yüklenince eşleşmeyen satırlar da raporlanacak.")
+                elif _q['unmatched']:
+                    st.warning(
+                        f"⚠️ **{_q['unmatched']:,} satır** hücre dosyasında bulunmayan "
+                        f"hücrelere işaret ediyor ve analize girmiyor "
+                        f"({len(_q['unmatched_cells'])} farklı hücre). "
+                        f"Örnek: {', '.join(sorted(_q['unmatched_cells'])[:4])}")
+                if _q['has_attempts']:
+                    _how = ('' if _q['attempt_match'] == 'alias'
+                            else ' — sütun adı tanıdık değil, benzerlikten eşleştirildi, kontrol edin')
+                    st.caption(f"📈 HO attempt sütunu: `{_q['attempt_column']}` — toplam "
+                               f"{_q['attempt_total']:,} deneme{_how}")
+                else:
+                    st.caption("ℹ️ HO attempt sütunu bulunamadı — çakışmalar "
+                               "trafik ağırlığı olmadan sıralanacak.")
         except Exception as e:
             st.error(f"❌ Okuma hatası: {e}")
     st.markdown("---")
@@ -686,19 +719,51 @@ with tab2:
             fb = px.bar(idf, x='Tip', y='Sayı', color='Önem', text='Sayı',
                         color_discrete_map={'KRİTİK':'#FF1744','YÜKSEK':'#FF9100',
                                             'ORTA':'#FFC400','DÜŞÜK':'#00E676'})
-            fb.update_layout(height=320); st.plotly_chart(fb, use_container_width=True)
+            _ymax_cur = int(idf['Sayı'].max()) if len(idf) else 0
+            if plan_result is not None:
+                _ymax_cur = max(_ymax_cur, int(max(plan_result[1], plan_result[2],
+                                                   plan_result[3], plan_result[4],
+                                                   plan_result[5], plan_result[6],
+                                                   plan_result[7])))
+            fb.update_layout(height=320, yaxis_range=[0, _ymax_cur * 1.12])
+            st.plotly_chart(fb, use_container_width=True)
 
-        # PCI dist
+        # PCI dist — plan öncesi/sonrası karşılaştırılabilir olsun diye
+        # eksen aralığı, kutu genişliği ve kategori sırası SABİT.
         df = st.session_state.df
+        _PCI_MAX = pci_max(_tech_now)
+        _BIN = 20                      # PCI başına kutu genişliği
+        _MOD3_COLORS = {'0': '#FF6384', '1': '#36A2EB', '2': '#FFCE56'}
+
+        def _pci_hist(_d, _title):
+            _f = px.histogram(_d, x='pci', title=_title,
+                              range_x=[-1, _PCI_MAX + 1])
+            _f.update_traces(xbins=dict(start=0, end=_PCI_MAX + 1, size=_BIN))
+            _f.update_layout(height=320, bargap=0.05,
+                             xaxis_title=f'PCI (0-{_PCI_MAX})')
+            return _f
+
+        def _mod3_pie(_d, _title):
+            _m = _d.copy()
+            _m['mod3'] = _m['pci'].apply(lambda x: str(int(x) % 3) if pd.notna(x) else None)
+            _m = _m.dropna(subset=['mod3'])
+            _f = px.pie(_m, names='mod3', title=_title, color='mod3',
+                        category_orders={'mod3': ['0', '1', '2']},
+                        color_discrete_map=_MOD3_COLORS)
+            _f.update_layout(height=320)
+            return _f
+
         ca, cb = st.columns(2)
         with ca:
-            fh = px.histogram(df, x='pci', nbins=50, title='PCI Histogram')
-            fh.update_layout(height=320); st.plotly_chart(fh, use_container_width=True)
+            st.plotly_chart(_pci_hist(df, 'PCI Histogram — Mevcut'),
+                            use_container_width=True)
         with cb:
-            dmod = df.copy(); dmod['mod3'] = dmod['pci'].apply(lambda x: int(x)%3 if pd.notna(x) else None)
-            fp = px.pie(dmod.dropna(subset=['mod3']), names='mod3', title='PCI Mod 3 (PSS)',
-                        color_discrete_sequence=['#FF6384','#36A2EB','#FFCE56'])
-            fp.update_layout(height=320); st.plotly_chart(fp, use_container_width=True)
+            st.plotly_chart(_mod3_pie(df, 'PCI Mod 3 (PSS) — Mevcut'),
+                            use_container_width=True)
+        st.caption(f"ℹ️ Histogram ekseni {_tech_now} için tam PCI aralığını "
+                   f"(0-{_PCI_MAX}) gösterir ve plan sonrası grafikle aynı "
+                   f"kutu genişliğini ({_BIN} PCI) kullanır — ikisi doğrudan "
+                   f"karşılaştırılabilir.")
 
         st.markdown("---")
         # Lazy Excel generation — only build on button click to avoid MemoryError
@@ -868,27 +933,40 @@ with tab2:
                                    f'Mod3 (cs:{_p[9]})','Mod6','Mod30','RSI'],
                             'Sayı':[_p[1],_p[2],_p[3],_p[5],_p[6],_p[7]],
                             'Önem':['KRİTİK','YÜKSEK','ORTA','DÜŞÜK','DÜŞÜK','YÜKSEK']})
+                    # Shared y range with the current-state bar chart, otherwise a
+                    # big 'before' and a small 'after' render at the same height.
+                    _ymax = max(int(idf['Sayı'].max()) if len(idf) else 0,
+                                int(p_idf['Sayı'].max()) if len(p_idf) else 0)
                     p_fb = px.bar(p_idf, x='Tip', y='Sayı', color='Önem', text='Sayı',
                                  title='Plan Sonrası Sorun Dağılımı',
                                  color_discrete_map={'KRİTİK':'#FF1744','YÜKSEK':'#FF9100',
                                                      'ORTA':'#FFC400','DÜŞÜK':'#00E676'})
-                    p_fb.update_layout(height=320)
+                    p_fb.update_layout(height=320, yaxis_range=[0, _ymax * 1.12])
                     st.plotly_chart(p_fb, use_container_width=True)
 
                 with p_cr:
-                    # PSS (mod3) pie chart for planned state
-                    _plan_mod3 = _plan_df.copy()
-                    _plan_mod3['PSS (mod3)'] = _plan_mod3['pci'].apply(lambda x: int(x) % 3 if pd.notna(x) else None)
-                    p_fp = px.pie(_plan_mod3.dropna(subset=['PSS (mod3)']), names='PSS (mod3)',
-                                 title='Plan Sonrası PCI Mod3 (PSS) Dağılımı',
-                                 color_discrete_sequence=['#FF6384','#36A2EB','#FFCE56'])
-                    p_fp.update_layout(height=320)
-                    st.plotly_chart(p_fp, use_container_width=True)
+                    # Same helper as the current-state chart: identical category
+                    # order and colours, so mod3=0 is the same colour in both.
+                    st.plotly_chart(_mod3_pie(_plan_df, 'PCI Mod 3 (PSS) — Plan Sonrası'),
+                                    use_container_width=True)
 
-                # PCI histogram for planned state
-                p_fh = px.histogram(_plan_df, x='pci', nbins=50, title='Plan Sonrası PCI Histogram')
-                p_fh.update_layout(height=300)
-                st.plotly_chart(p_fh, use_container_width=True)
+                # Same axis range and bin width as the current-state histogram
+                _h_before, _h_after = st.columns(2)
+                with _h_before:
+                    st.plotly_chart(_pci_hist(df, 'PCI Histogram — Mevcut'),
+                                    use_container_width=True)
+                with _h_after:
+                    st.plotly_chart(_pci_hist(_plan_df, 'PCI Histogram — Plan Sonrası'),
+                                    use_container_width=True)
+                _used_before = int(df['pci'].dropna().nunique())
+                _used_after = int(_plan_df['pci'].dropna().nunique())
+                _max_before = int(df['pci'].dropna().max()) if df['pci'].notna().any() else 0
+                _max_after = int(_plan_df['pci'].dropna().max()) if _plan_df['pci'].notna().any() else 0
+                st.caption(
+                    f"ℹ️ Kullanılan benzersiz PCI: **{_used_before}** → **{_used_after}**  ·  "
+                    f"en yüksek PCI: **{_max_before}** → **{_max_after}**  "
+                    f"(izinli aralık 0-{_PCI_MAX}). İki histogram aynı eksen ve "
+                    f"aynı kutu genişliğiyle çizilir.")
 
         # --- Show RSI Plan ---
         rsi_plan = st.session_state.rsi_plan

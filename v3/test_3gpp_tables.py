@@ -157,20 +157,38 @@ spec(g7, hasattr(E, 'delta_f_ra_khz') or hasattr(E, '_prach_params') and
      "_prach_params 'delta_f_ra_khz' dondurmeli")
 
 # ============================================================
-g8 = group('Kisitli kumede kok basina preamble (§5.7.2)',
-           expect_fail=True, finding='K-2')
+g8 = group('Kisitli kumede kok basina preamble (§5.7.2)')
 spec(g8, hasattr(E, 'preambles_per_root_restricted'),
      "preambles_per_root_restricted() fonksiyonu yok")
 if hasattr(E, 'preambles_per_root_restricted'):
-    for u in (1, 2, 3, 5, 17, 137, 400, 838):
-        for ncs in (15, 32, 76):
+    for u in range(1, NZC, 7):          # tum kok uzayini tara
+        for ncs in (15, 32, 76, 119, 279):
             exp = ref_restricted_shifts(u, ncs)
             got = E.preambles_per_root_restricted(u, ncs, NZC)
             spec(g8, got == exp, f"u={u}, Ncs={ncs}: {got} != {exp}")
-# Kisitli kumede kok sayisi ASLA unrestricted ile ayni olmamali
+    spec(g8, E.root_cyclic_shift(129) == 13 and E.root_cyclic_shift(710) == 13,
+         "d_u(129) ve d_u(710) = 13 (T5.7.2-4'un ilk iki girdisi)")
+    # Kisitli kume unrestricted'dan DAIMA daha cok kok ister
+    for ncs in (15, 32, 76):
+        b, t, w = E.restricted_roots_bounds(ncs)
+        unres = E.roots_needed(64, ncs)
+        spec(g8, b is not None and b > unres,
+             f"Ncs={ncs}: kisitli en iyi ({b}) > unrestricted ({unres}) olmali")
 spec(g8, hasattr(E, 'roots_needed_for_cell'),
-     "roots_needed_for_cell(rsi, ncs, restricted=...) fonksiyonu yok "
-     "(kisitli kumede kok sayisi baslangic indeksine baglidir)")
+     "roots_needed_for_cell(rsi, ncs, restricted=...) fonksiyonu yok")
+if hasattr(E, 'roots_needed_for_cell'):
+    spec(g8, E.roots_needed_for_cell(0, 26, restricted=False) == E.roots_needed(64, 26),
+         "unrestricted: baslangic indeksinden bagimsiz")
+    spec(g8, E.roots_needed_for_cell(0, 26, restricted=True) is None
+         or E.has_root_order(),
+         "kok sirasi yuklu degilken kisitli kok sayisi None donmeli "
+         "(unrestricted degeri UYDURULMAMALI)")
+
+g8b = group('Kisitli kume — tam cozum icin kok sirasi tablosu',
+            expect_fail=True, finding='K-2 / tablo bekleniyor')
+spec(g8b, E.has_root_order(NZC),
+     "TS 36.211 T5.7.2-4 (mantiksal->fiziksel kok sirasi) yuklenmemis; "
+     "kisitli kume kok sayisi ancak medyan tahminle veriliyor")
 
 # ============================================================
 g9 = group('PCI / RSI / PRACH config araliklari')

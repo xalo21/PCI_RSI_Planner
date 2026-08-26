@@ -141,12 +141,103 @@ COLUMN_ALIASES = {
                    'cell_radius_m','max_cell_range','coverage_radius'],
 }
 
+def summarize_external_neighbors(ext_df, valid_ids=None):
+    """Data-quality summary of an uploaded neighbour list.
+
+    The raw row count is misleading: a handover export carries both directions
+    of each relation, often duplicates, and rows referring to cells that are
+    not in the cell file (which find_neighbors silently drops).  What actually
+    reaches the analysis is the number of unique valid pairs.
+
+    Returns dict: rows, pairs, both_directions, duplicates, self_pairs,
+                  unmatched, unmatched_cells, has_attempts, attempt_total
+    """
+    cols = {str(c).strip().lower().replace(' ', '_'): c for c in ext_df.columns}
+    c1 = c2 = None
+    for a, b in [('cell_1', 'cell_2'), ('source', 'target'),
+                 ('neighbor_1', 'neighbor_2'), ('cell_a', 'cell_b'),
+                 ('hucre_1', 'hucre_2'), ('serving_cell', 'neighbor_cell')]:
+        if a in cols and b in cols:
+            c1, c2 = cols[a], cols[b]
+            break
+    out = {'rows': len(ext_df), 'pairs': 0, 'both_directions': 0, 'duplicates': 0,
+           'self_pairs': 0, 'unmatched': 0, 'unmatched_cells': set(),
+           'has_attempts': False, 'attempt_total': 0, 'parsed': bool(c1),
+           'attempt_column': None, 'attempt_match': None}
+    if not c1:
+        return out
+    att_col, att_how = resolve_attempt_column(ext_df.columns)
+    out['has_attempts'] = att_col is not None
+    out['attempt_column'] = att_col
+    out['attempt_match'] = att_how
+
+    seen = {}
+    directed = set()
+    for _, r in ext_df.iterrows():
+        a, b = str(r[c1]).strip(), str(r[c2]).strip()
+        if a == b:
+            out['self_pairs'] += 1
+            continue
+        if valid_ids is not None and (a not in valid_ids or b not in valid_ids):
+            out['unmatched'] += 1
+            for x in (a, b):
+                if x not in valid_ids:
+                    out['unmatched_cells'].add(x)
+            continue
+        if (a, b) in directed:
+            out['duplicates'] += 1
+        directed.add((a, b))
+        key = (a, b) if a < b else (b, a)
+        seen[key] = seen.get(key, 0) + 1
+        if att_col is not None:
+            try:
+                v = r[att_col]
+                if not pd.isna(v):
+                    out['attempt_total'] += int(float(v))
+            except (TypeError, ValueError):
+                pass
+    out['pairs'] = len(seen)
+    out['both_directions'] = sum(1 for v in seen.values() if v > 1)
+    return out
+
+
 # Column aliases for external neighbor list (attempts / handover counts)
 NEIGHBOR_ATTEMPT_ALIASES = [
-    'attempts', 'attempt', 'ho_attempts', 'ho_attempt',
-    'handover', 'handovers', 'ho_count', 'ho',
-    'att', 'deneme', 'girisim', 'sayi',
+    'attempts', 'attempt', 'attemps', 'attemp',        # 'attemps' seen in real exports
+    'attempt_count', 'attempts_count', 'att_count',
+    'ho_attempts', 'ho_attempt', 'ho_att', 'ho_attempt_count',
+    'handover', 'handovers', 'handover_attempt', 'handover_attempts',
+    'ho_count', 'ho', 'att',
+    'deneme', 'deneme_sayisi', 'girisim', 'girisim_sayisi', 'sayi',
 ]
+
+# Substring fallback: vendor exports misspell this column in creative ways
+# ('attemps', 'HO_Attmpt', 'HandoverAtt'), and losing the counts silently is
+# worse than matching one column too eagerly — the resolved name is reported
+# back to the user either way.
+_ATTEMPT_SUBSTRINGS = ('attem', 'attmp', 'handover', 'deneme', 'girisim', 'ho_cnt')
+
+
+def resolve_attempt_column(columns):
+    """Find the handover-attempt column in a neighbour list.
+
+    Returns (original_column_name, how) where `how` is 'alias' for an exact
+    match, 'fuzzy' for the substring fallback, or None when nothing matched.
+    """
+    norm = {str(c).strip().lower().replace(' ', '_').replace('-', '_'): c
+            for c in columns}
+    for alias in NEIGHBOR_ATTEMPT_ALIASES:
+        if alias in norm:
+            return norm[alias], 'alias'
+    pair_names = {'cell_1', 'cell_2', 'source', 'target', 'neighbor_1', 'neighbor_2',
+                  'cell_a', 'cell_b', 'hucre_1', 'hucre_2', 'serving_cell',
+                  'neighbor_cell'}
+    for low, orig in norm.items():
+        if low in pair_names:
+            continue
+        if any(sub in low for sub in _ATTEMPT_SUBSTRINGS):
+            return orig, 'fuzzy'
+    return None, None
 
 REQUIRED_COLUMNS = ['cell_id', 'latitude', 'longitude', 'pci']
 

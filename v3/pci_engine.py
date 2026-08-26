@@ -1043,14 +1043,169 @@ def cell_range_from_format(fmt, tech='LTE'):
     return tcp*1e-6 * SPEED_OF_LIGHT / 2 / 1000
 
 def preambles_per_root(ncs, nzc=NZC_LONG):
+    """Cyclic shifts per root in the UNRESTRICTED set: floor(N_ZC / N_CS).
+
+    Only valid when restrictedSetConfig is 'unrestricted'.  For the restricted
+    (high-speed) sets the count varies per root — see
+    preambles_per_root_restricted().
+    """
     return max(1, floor(nzc/ncs)) if ncs > 0 else 1
 
 def roots_needed(num_preambles, ncs, nzc=NZC_LONG):
+    """Roots needed in the UNRESTRICTED set."""
     return int(ceil(num_preambles / preambles_per_root(ncs, nzc)))
 
-def rsi_overlap(rsi1, ncs1, rsi2, ncs2, nzc=NZC_LONG, npre=64, max_rsi=LTE_RSI_COUNT):
-    r1 = roots_needed(npre, ncs1, nzc)
-    r2 = roots_needed(npre, ncs2, nzc)
+
+# ============================================================
+# Restricted (high-speed) set — K-2
+# ============================================================
+# 3GPP TS 36.211 §5.7.2 and TS 38.211 §6.3.3.1.  In the restricted set the
+# number of cyclic shifts a root yields is NOT floor(N_ZC/N_CS): it depends on
+# d_u, the cyclic shift of the root, and therefore varies from root to root.
+# Measured over all u for N_ZC=839: at N_CS=76 the unrestricted formula says 11
+# shifts per root while the restricted set yields a median of 2 — the
+# difference between reserving 6 roots and reserving 32.
+
+def root_cyclic_shift(u, nzc=NZC_LONG):
+    """d_u — the cyclic shift of physical root u.
+
+    d_u = p if p < N_ZC/2 else N_ZC - p, where p is the modular inverse of u.
+    """
+    u = int(u) % nzc
+    if u == 0:
+        return 0
+    p = pow(u, -1, nzc)
+    return p if p < nzc / 2 else nzc - p
+
+
+def preambles_per_root_restricted(u, ncs, nzc=NZC_LONG, set_type='A'):
+    """Cyclic shifts yielded by physical root u in the restricted set.
+
+    set_type 'A' implements TS 36.211 §5.7.2 / TS 38.211 restrictedSetTypeA
+    exactly.  Type B adds further constraints that are not implemented; it
+    falls back to the Type A value, which is an UPPER bound, so callers must
+    treat a Type B result as approximate (see _prach_params: restricted_approx).
+    """
+    if ncs <= 0:
+        return 1
+    d_u = root_cyclic_shift(u, nzc)
+    if ncs <= d_u < nzc / 3:
+        n_shift = d_u // ncs
+        d_start = 2 * d_u + n_shift * ncs
+        n_group = nzc // d_start if d_start else 0
+        n_shift_bar = max((nzc - 2 * d_u - n_group * d_start) // ncs, 0)
+    elif nzc / 3 <= d_u <= (nzc - ncs) // 2:
+        n_shift = (nzc - 2 * d_u) // ncs
+        d_start = nzc - 2 * d_u + n_shift * ncs
+        n_group = d_u // d_start if d_start else 0
+        n_shift_bar = min(max((d_u - n_group * d_start) // ncs, 0), n_shift)
+    else:
+        return 0
+    return n_shift * n_group + n_shift_bar
+
+
+# Logical -> physical root order (TS 36.211 Table 5.7.2-4 for L=839,
+# TS 38.211 Table 6.3.3.1-3).  This is an engineered permutation, not a
+# formula: it CANNOT be derived (the first entries are 129, 710, 140, 699,
+# 120, 719 ... whose d_u values are 13, 13, 6, 6, 7, 7 — not monotonic).
+# Until it is supplied, restricted-set root counts cannot be resolved exactly,
+# because how many logical indices a cell consumes depends on which physical
+# roots those indices land on.  Load it with set_root_order().
+ROOT_ORDER = {}          # nzc -> tuple(physical roots, indexed by logical index)
+
+
+def set_root_order(order, nzc=NZC_LONG):
+    """Install the logical->physical root order for a sequence length.
+
+    `order` must list the physical root for every logical index, in order
+    (838 entries for N_ZC=839, 138 for N_ZC=139).
+    """
+    order = tuple(int(x) for x in order)
+    expected = nzc - 1
+    if len(order) != expected:
+        raise ValueError(f"N_ZC={nzc} icin {expected} girdi bekleniyor, "
+                         f"{len(order)} verildi")
+    if not all(1 <= x < nzc for x in order):
+        raise ValueError("fiziksel kok degerleri 1..N_ZC-1 araliginda olmali")
+    if len(set(order)) != len(order):
+        raise ValueError("tabloda tekrar eden fiziksel kok var")
+    ROOT_ORDER[nzc] = order
+    return len(order)
+
+
+def has_root_order(nzc=NZC_LONG):
+    return nzc in ROOT_ORDER
+
+
+def roots_needed_for_cell(rsi_start, ncs, nzc=NZC_LONG, restricted=False,
+                          n_preambles=64, set_type='A'):
+    """Consecutive LOGICAL root indices this cell consumes.
+
+    Unrestricted: constant per root, so ceil(64 / floor(N_ZC/N_CS)) — the start
+    index is irrelevant.  Restricted: each root yields a different number of
+    shifts, so the walk starts at rsi_start and accumulates until 64 preambles
+    are reached, which makes the answer depend on WHERE the cell starts.
+
+    Returns None when the restricted case cannot be resolved because the
+    logical->physical root order has not been installed.
+    """
+    if ncs <= 0:
+        return int(n_preambles)     # no cyclic shift: one preamble per root
+    if not restricted:
+        return roots_needed(n_preambles, ncs, nzc)
+    order = ROOT_ORDER.get(nzc)
+    if not order:
+        return None
+    m = len(order)
+    start = int(rsi_start) % m
+    total = 0
+    for k in range(m):
+        u = order[(start + k) % m]
+        total += preambles_per_root_restricted(u, ncs, nzc, set_type)
+        if total >= n_preambles:
+            return k + 1
+    return None                     # not even the whole space is enough
+
+
+def restricted_roots_bounds(ncs, nzc=NZC_LONG, set_type='A'):
+    """(best, typical, worst) root counts over every possible start index.
+
+    Used to bound the answer when the root order is unknown: the walk cannot be
+    performed, but the DISTRIBUTION of per-root yields is still computable, so
+    a defensible reservation can be reported instead of the unrestricted
+    formula's optimistic number.
+    """
+    if ncs <= 0:
+        return (n := int(64)), n, n
+    yields = sorted(preambles_per_root_restricted(u, ncs, nzc, set_type)
+                    for u in range(1, nzc))
+    if not yields or yields[-1] <= 0:
+        return None, None, None
+    best = int(ceil(64 / yields[-1]))
+    med = yields[len(yields) // 2]
+    typical = int(ceil(64 / med)) if med > 0 else None
+    # worst case: take the smallest yields first until 64 preambles accumulate
+    total = 0
+    worst = None
+    for i, y in enumerate(yields):
+        total += y
+        if total >= 64:
+            worst = i + 1
+            break
+    return best, typical, worst
+
+def rsi_overlap(rsi1, ncs1, rsi2, ncs2, nzc=NZC_LONG, npre=64, max_rsi=LTE_RSI_COUNT,
+                r1=None, r2=None):
+    """Do two cells' root-sequence ranges overlap?
+
+    r1/r2 let the caller pass restricted-set root counts, which cannot be
+    derived from Ncs alone.  Omitted, they fall back to the unrestricted
+    formula.
+    """
+    if r1 is None:
+        r1 = roots_needed(npre, ncs1, nzc)
+    if r2 is None:
+        r2 = roots_needed(npre, ncs2, nzc)
     s1 = {(rsi1+i)%max_rsi for i in range(r1)}
     s2 = {(rsi2+i)%max_rsi for i in range(r2)}
     return len(s1 & s2) > 0
@@ -1141,7 +1296,7 @@ def _effective_zcz(row, technology='LTE'):
         zcz = 5
     return int(zcz)
 
-def _prach_params(row, technology='LTE'):
+def _prach_params(row, technology='LTE', rsi=None):
     """Resolve every PRACH quantity for one cell row — the single derivation point.
 
     Preamble format, L_RA (Nzc), the effective zeroCorrelationZoneConfig, Ncs,
@@ -1150,9 +1305,14 @@ def _prach_params(row, technology='LTE'):
     the UI panel all read from this function, so they can never disagree about
     a cell the way v2's six copies of this logic did.
 
+    `rsi` matters only for the restricted (high-speed) set, where each root
+    yields a different number of cyclic shifts and the count therefore depends
+    on where the cell starts in the logical root order.
+
     Returns dict:
         technology, prach_config_index, preamble_format, is_short, nzc, zcz,
-        restricted, ncs, tseq_us, max_rsi, preambles_per_root, roots_needed
+        restricted, ncs, tseq_us, max_rsi, preambles_per_root, roots_needed,
+        roots_exact, roots_min, roots_max, feasible
     """
     technology = norm_tech(technology)
     pcfg = int(row.get('prach_config_index', 0) or 0)
@@ -1169,6 +1329,31 @@ def _prach_params(row, technology='LTE'):
         tseq_us = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
 
     ncs = get_ncs(zcz, technology, restricted=restricted, short=is_short)
+
+    # Root demand.  Unrestricted is a constant per root; restricted is not, so
+    # it needs the logical->physical root order to be resolved exactly.  When
+    # that table is not installed we fall back to the median-per-root estimate
+    # and flag it, rather than silently reporting the unrestricted number,
+    # which understates the demand by a factor of 3-5.
+    roots_exact = True
+    roots_min = roots_max = None
+    feasible = True
+    if restricted:
+        rn = roots_needed_for_cell(rsi if rsi is not None else 0, ncs, nzc,
+                                   restricted=True)
+        if rn is None:
+            roots_exact = False
+            roots_min, _typ, roots_max = restricted_roots_bounds(ncs, nzc)
+            if _typ is None:
+                feasible = False
+                rn = None
+            else:
+                rn = _typ
+        ppr = preambles_per_root_restricted(1, ncs, nzc)
+    else:
+        rn = roots_needed(64, ncs, nzc)
+        ppr = preambles_per_root(ncs, nzc)
+
     return {
         'technology': technology,
         'prach_config_index': pcfg,
@@ -1180,8 +1365,12 @@ def _prach_params(row, technology='LTE'):
         'ncs': ncs,
         'tseq_us': tseq_us,
         'max_rsi': (NZC_SHORT - 1) if is_short else (NZC_LONG - 1),
-        'preambles_per_root': preambles_per_root(ncs, nzc),
-        'roots_needed': roots_needed(64, ncs, nzc),
+        'preambles_per_root': ppr,
+        'roots_needed': rn,
+        'roots_exact': roots_exact,
+        'roots_min': roots_min,
+        'roots_max': roots_max,
+        'feasible': feasible,
     }
 
 
@@ -1200,6 +1389,10 @@ def compute_cell_prach_info(row, technology='LTE'):
     return {
         'preamble_format': p['preamble_format'], 'ncs': p['ncs'], 'nzc': p['nzc'],
         'effective_zcz': p['zcz'],
+        'restricted': p['restricted'],
+        'roots_exact': p['roots_exact'],
+        'roots_min': p['roots_min'], 'roots_max': p['roots_max'],
+        'feasible': p['feasible'],
         'cell_range_ncs_km': round(
             cell_range_from_ncs(p['ncs'], p['nzc'], p['tseq_us']), 2),
         'cell_range_format_km': fmt_km,
@@ -1333,12 +1526,8 @@ def find_neighbors(df, radius_km, use_antenna=True, default_bw=65.0,
                     c1_col, c2_col = cols_lower[a], cols_lower[b]
                     break
             # Detect attempts column
-            from data_handler import NEIGHBOR_ATTEMPT_ALIASES
-            att_col = None
-            for alias in NEIGHBOR_ATTEMPT_ALIASES:
-                if alias in cols_lower:
-                    att_col = cols_lower[alias]
-                    break
+            from data_handler import resolve_attempt_column
+            att_col, _att_how = resolve_attempt_column(external_neighbors.columns)
             if c1_col and c2_col:
                 valid_ids = set(ids)
                 for _, row in external_neighbors.iterrows():
@@ -1576,10 +1765,15 @@ def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_t
     rm = dict(zip(df['cell_id'], df[rsi_col]))
     nm = {}   # cell_id -> Ncs
     nzm = {}  # cell_id -> Nzc (139 for short seq, 839 otherwise)
+    rootm = {}  # cell_id -> roots consumed (restricted-aware)
     for _,r in df.iterrows():
-        _p = _prach_params(r, technology)
+        _rv = r.get(rsi_col)
+        _p = _prach_params(r, technology,
+                           rsi=int(_rv) if _rv is not None and not pd.isna(_rv) else None)
         nzm[r['cell_id']] = _p['nzc']
         nm[r['cell_id']] = _p['ncs']
+        rootm[r['cell_id']] = (_p['roots_needed'] if _p['roots_needed']
+                               else roots_needed(64, _p['ncs'] or 13, _p['nzc']))
     # Per-cell max_rsi: depends on Nzc (L=839→max 838, L=139→max 138)
     max_rsi_map = {}  # cell_id → max_rsi
     for cid, nzc in nzm.items():
@@ -1614,9 +1808,10 @@ def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_t
             c_mx = max_rsi_map.get(c, mx_default)
             nb_mx = max_rsi_map.get(nb, mx_default)
             pair_mx = max(c_mx, nb_mx)  # use larger for overlap check
-            if rsi_overlap(int(cr), cn, int(nr_), nn, overlap_nzc, 64, pair_mx):
-                r1 = roots_needed(64, cn, c_nzc)
-                r2 = roots_needed(64, nn, nb_nzc)
+            r1 = rootm.get(c, roots_needed(64, cn, c_nzc))
+            r2 = rootm.get(nb, roots_needed(64, nn, nb_nzc))
+            if rsi_overlap(int(cr), cn, int(nr_), nn, overlap_nzc, 64, pair_mx,
+                           r1=r1, r2=r2):
                 dist, facing, _ = _cell_pair_info(c, nb, loc_map, az_map, cell_to_sector)
                 att = nbr_attempts.get(p, '')
                 rows.append({
@@ -3168,14 +3363,19 @@ def plan_rsi_network(df, neighbors, technology='LTE',
     cell_info = {}
     for _, row in df.iterrows():
         cid = str(row['cell_id'])
-        _p = _prach_params(row, technology)
+        _cur_rsi_raw = row.get('rsi')
+        _p = _prach_params(row, technology,
+                           rsi=int(_cur_rsi_raw) if _cur_rsi_raw is not None
+                           and not pd.isna(_cur_rsi_raw) else None)
         is_short = _p['is_short']
         nzc = _p['nzc']
         ncs = _p['ncs']
         if ncs == 0:
             ncs = 13  # fallback: can't have Ncs=0 for planning
         tseq = _p['tseq_us']
-        rn = roots_needed(64, ncs, nzc)
+        # Restricted-set cells consume far more roots than the unrestricted
+        # formula suggests; reserve accordingly (K-2).
+        rn = _p['roots_needed'] or roots_needed(64, ncs, nzc)
         cr_km = cell_range_from_ncs(ncs, nzc, tseq)
         # Per-cell max_rsi: L=139 → max 138, L=839 → max 838
         cell_max_rsi = (NZC_SHORT - 1) if is_short else max_rsi
