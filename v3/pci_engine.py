@@ -1007,22 +1007,70 @@ def _effective_zcz(row, technology='LTE'):
         zcz = 5
     return int(zcz)
 
-def compute_cell_prach_info(row, technology='LTE'):
-    technology = norm_tech(technology)  # UI = tek otorite
-    pcfg = int(row.get('prach_config_index',0) or 0)
+def _prach_params(row, technology='LTE'):
+    """Resolve every PRACH quantity for one cell row — the single derivation point.
+
+    Preamble format, L_RA (Nzc), the effective zeroCorrelationZoneConfig, Ncs,
+    the cyclic-shift window and the resulting root-sequence demand are all
+    computed here.  Conflict detection, RSI planning, the new-cell finder and
+    the UI panel all read from this function, so they can never disagree about
+    a cell the way v2's six copies of this logic did.
+
+    Returns dict:
+        technology, prach_config_index, preamble_format, is_short, nzc, zcz,
+        restricted, ncs, tseq_us, max_rsi, preambles_per_root, roots_needed
+    """
+    technology = norm_tech(technology)
+    pcfg = int(row.get('prach_config_index', 0) or 0)
     zcz = _effective_zcz(row, technology)
-    fmt = get_lte_preamble_format(pcfg)
-    # Format 4 (short preamble) uses Nzc=139; others use Nzc=839
-    nzc = NZC_SHORT if fmt == 4 else NZC_LONG
-    ncs = get_ncs(zcz, technology, restricted=_row_restricted(row), short=(fmt == 4))
-    tseq = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
+    restricted = _row_restricted(row)
+
+    if technology == 'NR':
+        is_short, nzc, tseq_us = get_nr_preamble_info(pcfg)
+        fmt = 'Short (L=139)' if is_short else 'Long (L=839)'
+    else:
+        fmt = get_lte_preamble_format(pcfg)
+        is_short = (fmt == 4)          # LTE format 4 is TDD-only, L_RA = 139
+        nzc = NZC_SHORT if is_short else NZC_LONG
+        tseq_us = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
+
+    ncs = get_ncs(zcz, technology, restricted=restricted, short=is_short)
     return {
-        'preamble_format': fmt, 'ncs': ncs, 'nzc': nzc,
-        'effective_zcz': zcz,
-        'cell_range_ncs_km': round(cell_range_from_ncs(ncs, nzc, tseq), 2),
-        'cell_range_format_km': round(cell_range_from_format(fmt, technology), 2),
+        'technology': technology,
+        'prach_config_index': pcfg,
+        'preamble_format': fmt,
+        'is_short': is_short,
+        'nzc': nzc,
+        'zcz': zcz,
+        'restricted': restricted,
+        'ncs': ncs,
+        'tseq_us': tseq_us,
+        'max_rsi': (NZC_SHORT - 1) if is_short else (NZC_LONG - 1),
         'preambles_per_root': preambles_per_root(ncs, nzc),
-        'roots_needed': roots_needed(64, ncs, nzc)}
+        'roots_needed': roots_needed(64, ncs, nzc),
+    }
+
+
+def compute_cell_prach_info(row, technology='LTE'):
+    """UI-facing view of a cell's PRACH configuration.
+
+    Thin wrapper over _prach_params so the displayed Ncs / roots / cell range
+    are always the same numbers the analysis and the planners use.
+    """
+    technology = norm_tech(technology)  # UI = tek otorite
+    p = _prach_params(row, technology)
+    # cell_range_from_format() only knows the LTE T_CP table; for NR it would
+    # return a meaningless number, so report nothing rather than something wrong.
+    fmt_km = (round(cell_range_from_format(p['preamble_format'], technology), 2)
+              if technology == 'LTE' else None)
+    return {
+        'preamble_format': p['preamble_format'], 'ncs': p['ncs'], 'nzc': p['nzc'],
+        'effective_zcz': p['zcz'],
+        'cell_range_ncs_km': round(
+            cell_range_from_ncs(p['ncs'], p['nzc'], p['tseq_us']), 2),
+        'cell_range_format_km': fmt_km,
+        'preambles_per_root': p['preambles_per_root'],
+        'roots_needed': p['roots_needed']}
 
 # ============================================================
 # Neighbor Discovery
@@ -1364,15 +1412,9 @@ def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_t
     nm = {}   # cell_id -> Ncs
     nzm = {}  # cell_id -> Nzc (139 for short seq, 839 otherwise)
     for _,r in df.iterrows():
-        zcz = _effective_zcz(r, technology)
-        pcfg = int(r.get('prach_config_index', 0) or 0)
-        if technology == 'NR':
-            is_short, _nzc, _tseq = get_nr_preamble_info(pcfg)
-        else:
-            fmt = get_lte_preamble_format(pcfg)
-            is_short = (fmt == 4)
-        nzm[r['cell_id']] = NZC_SHORT if is_short else NZC_LONG
-        nm[r['cell_id']] = get_ncs(int(zcz), technology, restricted=_row_restricted(r), short=is_short)
+        _p = _prach_params(r, technology)
+        nzm[r['cell_id']] = _p['nzc']
+        nm[r['cell_id']] = _p['ncs']
     # Per-cell max_rsi: depends on Nzc (L=839→max 838, L=139→max 138)
     max_rsi_map = {}  # cell_id → max_rsi
     for cid, nzc in nzm.items():
@@ -2227,15 +2269,9 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         rv = r.get('rsi')
         if rv is not None and not pd.isna(rv):
             rsi_map[cid] = int(rv)
-        zcz = _effective_zcz(r, technology)
-        pcfg = int(r.get('prach_config_index', 0) or 0)
-        if technology == 'NR':
-            is_short, _nzc, _tseq = get_nr_preamble_info(pcfg)
-        else:
-            fmt = get_lte_preamble_format(pcfg)
-            is_short = (fmt == 4)
-        nzc_map[cid] = NZC_SHORT if is_short else NZC_LONG
-        ncs_map[cid] = get_ncs(int(zcz), technology, restricted=_row_restricted(r), short=is_short)
+        _p = _prach_params(r, technology)
+        nzc_map[cid] = _p['nzc']
+        ncs_map[cid] = _p['ncs']
 
     # Normalize neighbours to strings
     neighbors = {str(k): {str(v) for v in vs} for k, vs in nb_all.items()}
@@ -2264,17 +2300,10 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         nbs = neighbors.get(cid, set())
 
         # --- Compute Ncs / roots_needed for the new cell ---
-        zcz = _effective_zcz(new_row, technology)
-        pcfg = int(new_row.get('prach_config_index', 0) or 0)
-        if technology == 'NR':
-            _nr_is_short, _nr_nzc, _nr_tseq = get_nr_preamble_info(pcfg)
-            is_short = _nr_is_short
-        else:
-            fmt = get_lte_preamble_format(pcfg)
-            is_short = (fmt == 4)
-        cell_nzc = NZC_SHORT if is_short else NZC_LONG
-        cell_ncs = get_ncs(int(zcz), technology, restricted=_row_restricted(new_row), short=is_short)
-        cell_rn = roots_needed(64, cell_ncs, cell_nzc)
+        _p = _prach_params(new_row, technology)
+        cell_nzc = _p['nzc']
+        cell_ncs = _p['ncs']
+        cell_rn = _p['roots_needed']
         nzc_map[cid] = cell_nzc
         ncs_map[cid] = cell_ncs
 
@@ -2452,15 +2481,9 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
         rv = r.get('rsi')
         if rv is not None and not pd.isna(rv):
             rsi_map[cid] = int(rv)
-        zcz = _effective_zcz(r, technology)
-        pcfg = int(r.get('prach_config_index', 0) or 0)
-        if technology == 'NR':
-            is_short, _nzc, _tseq = get_nr_preamble_info(pcfg)
-        else:
-            fmt = get_lte_preamble_format(pcfg)
-            is_short = (fmt == 4)
-        nzc_map[cid] = NZC_SHORT if is_short else NZC_LONG
-        ncs_map[cid] = get_ncs(int(zcz), technology, restricted=_row_restricted(r), short=is_short)
+        _p = _prach_params(r, technology)
+        nzc_map[cid] = _p['nzc']
+        ncs_map[cid] = _p['ncs']
 
     # Normalize neighbours to strings
     str_neighbors = {str(k): {str(v) for v in vs} for k, vs in neighbors.items()}
@@ -2729,18 +2752,11 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
     nzc_map = {}
     tseq_map = {}
     for _, r in df.iterrows():
-        zcz = _effective_zcz(r, technology)
-        pcfg = int(r.get('prach_config_index', 0) or 0)
         cid = str(r['cell_id'])
-        if technology == 'NR':
-            is_short, _nzc, _tseq = get_nr_preamble_info(pcfg)
-        else:
-            fmt = get_lte_preamble_format(pcfg)
-            is_short = (fmt == 4)
-            _tseq = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
-        nzc_map[cid] = NZC_SHORT if is_short else NZC_LONG
-        ncs_map[cid] = get_ncs(int(zcz), technology, restricted=_row_restricted(r), short=is_short)
-        tseq_map[cid] = _tseq if technology != 'NR' else (133.33 if is_short else 800.0)
+        _p = _prach_params(r, technology)
+        nzc_map[cid] = _p['nzc']
+        ncs_map[cid] = _p['ncs']
+        tseq_map[cid] = _p['tseq_us']
 
     # Collect problem cells
     problem_cells: Dict[str, list] = defaultdict(list)
@@ -2891,19 +2907,13 @@ def plan_rsi_network(df, neighbors, technology='LTE',
     cell_info = {}
     for _, row in df.iterrows():
         cid = str(row['cell_id'])
-        zcz = _effective_zcz(row, technology)
-        pcfg = int(row.get('prach_config_index', 0) or 0)
-        if technology == 'NR':
-            is_short, _nzc, _tseq = get_nr_preamble_info(pcfg)
-        else:
-            fmt = get_lte_preamble_format(pcfg)
-            is_short = (fmt == 4)
-            _tseq = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
-        nzc = NZC_SHORT if is_short else NZC_LONG
-        ncs = get_ncs(zcz, technology, restricted=_row_restricted(row), short=is_short)
+        _p = _prach_params(row, technology)
+        is_short = _p['is_short']
+        nzc = _p['nzc']
+        ncs = _p['ncs']
         if ncs == 0:
             ncs = 13  # fallback: can't have Ncs=0 for planning
-        tseq = _tseq if technology != 'NR' else (133.33 if is_short else 800.0)
+        tseq = _p['tseq_us']
         rn = roots_needed(64, ncs, nzc)
         cr_km = cell_range_from_ncs(ncs, nzc, tseq)
         # Per-cell max_rsi: L=139 → max 138, L=839 → max 838
