@@ -33,6 +33,8 @@ from pci_engine import (
     _build_loc_az_maps,
     LTE_PCI_COUNT, NR_PCI_COUNT, LTE_NCS_UNRESTRICTED, NZC_LONG,
     norm_tech, pci_count, pci_max, sss_count, prach_config_max,
+    enrich_carrier_column, build_carrier_map, carrier_report,
+    CARRIER_UNKNOWN, PLANNING_SCOPES,
     LTE_PREAMBLE_FORMATS, NR_PREAMBLE_FORMATS, NR_NCS_LONG, NR_NCS_SHORT,
 )
 from data_handler import (
@@ -82,6 +84,7 @@ def _process_cell_excel(file_bytes: bytes, file_name: str, technology: str = 'LT
     sg, c2s = None, None
     if df is not None:
         df = enrich_band_columns(df)
+        df = enrich_carrier_column(df)
         if (('prach_config_index' in df.columns and 'zero_correlation_zone' in df.columns)
                 or 'cell_range' in df.columns):
             df['cell_range_km'] = df.apply(
@@ -147,6 +150,21 @@ with st.sidebar:
         check_mod6 = st.checkbox("Mod 6 (RS)", True)
         check_mod30 = st.checkbox("Mod 30 (PCFICH)", True)
     check_rsi = st.checkbox("RSI (PRACH cell-range)", True)
+
+    st.markdown("---")
+    st.markdown("### 🧭 Planlama Stratejisi")
+    _scope_label = st.radio(
+        "PCI/RSI karar birimi",
+        ["Sektör bazı (tüm taşıyıcılar tek PCI)",
+         "Taşıyıcı bazı (her taşıyıcı ayrı PCI)"],
+        index=0,
+        help="Sektör bazı: bir fiziksel sektörün tüm bantları aynı PCI/RSI'yi paylaşır "
+             "(mevcut operatör stratejisi). Taşıyıcı bazı: her taşıyıcı bağımsız planlanır, "
+             "daha fazla serbestlik verir.")
+    planning_scope = 'sector' if _scope_label.startswith('Sekt') else 'carrier'
+    st.caption("ℹ️ Çakışma kapsamı her iki modda da taşıyıcı bazıdır: farklı "
+               "frekanstaki iki hücre fiziksel olarak birbirini etkilemez "
+               "(ölçüm raporu PCI+ARFCN taşır).")
     st.markdown("---")
     @st.cache_data(show_spinner=False)
     def _cached_sample(t):
@@ -169,13 +187,14 @@ def _stale_results_warning():
     ap = st.session_state.analysis_params
     if not ap or st.session_state.results is None:
         return
-    _now = {'tech': tech, 'radius_km': float(radius_km),
+    _now = {'tech': tech, 'radius_km': float(radius_km), 'scope': planning_scope,
             'use_antenna': use_antenna, 'default_bw': float(default_bw),
             'mod3': check_mod3, 'mod4': check_mod4, 'mod6': check_mod6,
             'mod30': check_mod30, 'rsi': check_rsi,
             'intra_site': include_intra_site,
             'has_external': st.session_state.external_neighbors is not None}
     _labels = {'tech': 'Teknoloji', 'radius_km': 'Tarama Yarıçapı',
+               'scope': 'Planlama Stratejisi',
                'use_antenna': 'Anten Yönü', 'default_bw': 'Hüzme Genişliği',
                'mod3': 'Mod3', 'mod4': 'Mod4', 'mod6': 'Mod6', 'mod30': 'Mod30',
                'rsi': 'RSI Kontrolü', 'intra_site': 'Aynı-Site Komşuluğu',
@@ -352,6 +371,7 @@ Aralıklar seçili teknolojiye (**{_tech_lbl}**) göre gösterilir.
                 # Snapshot the parameters used — tabs warn if sidebar changes later
                 st.session_state.analysis_params = {
                     'tech': tech, 'radius_km': float(radius_km),
+                    'scope': planning_scope,
                     'use_antenna': use_antenna, 'default_bw': float(default_bw),
                     'mod3': check_mod3, 'mod4': check_mod4, 'mod6': check_mod6,
                     'mod30': check_mod30, 'rsi': check_rsi,
@@ -600,6 +620,40 @@ with tab2:
                 _warn_parts.append(f"**{_cs_m4}** co-site Mod4 (aynı site, farklı sektör — SSB DMRS aynı)")
             st.warning("⚠️ " + ", ".join(_warn_parts) + ". Co-site hücrelerinde PCI/mod3/mod4 **kesinlikle** farklı olmalıdır!")
 
+        # ── Per-carrier breakdown ─────────────────────────────
+        _pcar = s.get('per_carrier') or []
+        if len(_pcar) > 1:
+            st.markdown("---")
+            st.markdown("### 📶 Taşıyıcı (Frekans Katmanı) Bazlı Skor")
+            _rows = []
+            for pc in _pcar:
+                _row = {'Taşıyıcı': ('— (bilinmiyor)' if pc['carrier'] == CARRIER_UNKNOWN
+                                     else pc['carrier']),
+                        'Hücre': pc['cells'], 'Komşu Çifti': pc['neighbor_pairs'],
+                        'Collision': pc['collision'], 'Confusion': pc['confusion'],
+                        'Mod3': pc['mod3']}
+                if _tech_now == 'NR':
+                    _row['Mod4'] = pc['mod4']
+                else:
+                    _row['Mod6'] = pc['mod6']
+                    _row['Mod30'] = pc['mod30']
+                _row['RSI'] = pc['rsi']
+                _row['Skor'] = pc['health_score']
+                _rows.append(_row)
+            st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+            _cross = s.get('total_neighbor_pairs_all_layers', 0) - s.get('total_neighbor_pairs', 0)
+            st.caption(
+                f"ℹ️ Toplam {s.get('total_neighbor_pairs_all_layers', 0):,} komşu çiftinin "
+                f"**{_cross:,} tanesi çapraz katman** — farklı taşıyıcıdaki hücreler "
+                f"birbirini fiziksel olarak etkilemediği için çakışma sayımına girmez "
+                f"(ölçüm raporu PCI + ARFCN taşır). Yukarıdaki sayılar yalnızca "
+                f"aynı taşıyıcıdaki {s.get('total_neighbor_pairs', 0):,} çifte dayanır.")
+            if s.get('cells_without_carrier', 0) > 0:
+                st.warning(
+                    f"⚠️ {s['cells_without_carrier']} hücrenin taşıyıcısı belirlenemedi "
+                    f"(`earfcn`/`arfcn` veya `band` sütunu eksik). Bunlar kendi aralarında "
+                    f"tek bir katman gibi değerlendirildi.")
+
         st.markdown("---")
         cl, cr = st.columns(2)
         with cl:
@@ -726,7 +780,9 @@ with tab2:
                                                progress_callback=_pci_progress,
                                                sa_iterations_override=sa_iter_input,
                                                reserved_pci_start=sa_reserved_start,
-                                               reserved_pci_end=sa_reserved_end)
+                                               reserved_pci_end=sa_reserved_end,
+                                               carrier_map=_results.get('carrier_map'),
+                                               planning_scope=planning_scope)
                     st.session_state.pci_plan = pci_plan
                     # Invalidate plan caches
                     st.session_state._plan_cache_key = None
@@ -748,7 +804,9 @@ with tab2:
                     rsi_plan = plan_rsi_network(_df, _results['neighbors'], _tech,
                                                    st.session_state.sector_groups,
                                                    st.session_state.cell_to_sector,
-                                                   progress_callback=_rsi_progress)
+                                                   progress_callback=_rsi_progress,
+                                                   carrier_map=_results.get('carrier_map'),
+                                                   planning_scope=planning_scope)
                     st.session_state.rsi_plan = rsi_plan
                     # Invalidate plan caches
                     st.session_state._plan_cache_key = None
@@ -1847,6 +1905,8 @@ with tab5:
                         nbr_attempts=_sug_results.get('neighbor_attempts', {}),
                         check_mod4=check_mod4,
                         progress_fn=_pci_prog,
+                        carrier_map=_sug_results.get('carrier_map'),
+                        planning_scope=planning_scope,
                     )
                     _pci_prog_bar.progress(1.0, text="PCI önerileri tamamlandı!")
                     st.session_state['pci_suggestions'] = _pci_sug
@@ -1870,6 +1930,8 @@ with tab5:
                         sector_groups=_sug_sg,
                         cell_to_sector=_sug_c2s,
                         progress_fn=_rsi_prog,
+                        carrier_map=_sug_results.get('carrier_map'),
+                        planning_scope=planning_scope,
                     )
                     _rsi_prog_bar.progress(1.0, text="RSI önerileri tamamlandı!")
                     st.session_state['rsi_suggestions'] = _rsi_sug
@@ -1986,6 +2048,8 @@ with tab5:
                             cell_to_sector=_sug_c2s,
                             rescan_pci=("PCI" in _rescan_what),
                             rescan_rsi=("RSI" in _rescan_what),
+                            carrier_map=_sug_results.get('carrier_map'),
+                            planning_scope=planning_scope,
                         )
                         st.session_state['rescan_results'] = _rescan_result
                     except Exception as e:

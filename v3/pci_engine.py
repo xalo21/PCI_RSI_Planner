@@ -75,6 +75,140 @@ def rsi_count(technology='LTE', short=False):
         NR_RSI_LONG_COUNT if norm_tech(technology) == 'NR' else LTE_RSI_COUNT)
 
 
+# ============================================================
+# Carrier (frequency layer) identity — K-1
+# ============================================================
+# Collision, confusion, mod-N and RSI conflicts are only defined between cells
+# on the SAME carrier: a UE measurement report carries (PCI, ARFCN), so two
+# cells on different frequencies can never be confused for one another.
+# This scoping is physics, not strategy — it is always on.  What IS a strategy
+# choice is the planning granularity (one PCI per physical sector across all
+# its carriers, vs one PCI per sector per carrier); see PLANNING_SCOPES.
+
+PLANNING_SCOPES = ('sector', 'carrier')
+
+CARRIER_UNKNOWN = '?'
+
+
+def cell_carrier(row):
+    """Carrier key for one cell row.
+
+    Priority: explicit earfcn/arfcn > band column > band parsed from the cell
+    ID naming convention.  Returns CARRIER_UNKNOWN when nothing identifies the
+    carrier.
+
+    An explicit ARFCN is the only fully reliable source: a band alone cannot
+    separate two carriers in the same band (e.g. an 1800 MHz 20 MHz carrier
+    and an 1800 MHz 10 MHz carrier), and the cell-ID prefix cannot either —
+    in real data one prefix is used for two different bands.
+    """
+    for key, tag in (('earfcn', 'AR'), ('arfcn', 'AR')):
+        v = row.get(key)
+        if v is not None:
+            try:
+                if not pd.isna(v) and float(v) > 0:
+                    return f'{tag}{int(float(v))}'
+            except (TypeError, ValueError):
+                pass
+    v = row.get('band')
+    if v is not None:
+        try:
+            if not pd.isna(v) and float(v) > 0:
+                return f'B{int(float(v))}'
+        except (TypeError, ValueError):
+            s = str(v).strip()
+            if s and s.lower() != 'nan':
+                return f'B{s}'
+    v = row.get('band_mhz')
+    if v is not None:
+        try:
+            if not pd.isna(v) and float(v) > 0:
+                return f'B{int(float(v))}'
+        except (TypeError, ValueError):
+            pass
+    return CARRIER_UNKNOWN
+
+
+def build_carrier_map(df):
+    """cell_id -> carrier key.  See cell_carrier() for the resolution order."""
+    if 'carrier' in df.columns:
+        out = {str(r['cell_id']): (str(r['carrier']) if pd.notna(r['carrier'])
+                                   else CARRIER_UNKNOWN)
+               for _, r in df.iterrows()}
+        return out
+    return {str(r['cell_id']): cell_carrier(r) for _, r in df.iterrows()}
+
+
+def enrich_carrier_column(df):
+    """Add a 'carrier' column derived from earfcn/arfcn, band, or the cell ID."""
+    df = df.copy()
+    df['carrier'] = [cell_carrier(r) for _, r in df.iterrows()]
+    return df
+
+
+def carrier_report(carrier_map):
+    """(n_carriers, n_unknown, {carrier: cell_count}) for messaging."""
+    counts = defaultdict(int)
+    for c in carrier_map.values():
+        counts[c] += 1
+    known = {k: v for k, v in counts.items() if k != CARRIER_UNKNOWN}
+    return len(known), counts.get(CARRIER_UNKNOWN, 0), dict(counts)
+
+
+def same_carrier(carrier_map, a, b):
+    """True if two cells share a carrier.
+
+    With no carrier information at all every cell resolves to CARRIER_UNKNOWN,
+    so the whole network behaves as a single carrier — identical to the
+    pre-K-1 behaviour.  Cells whose carrier could not be resolved are kept in
+    their own bucket rather than being made to conflict with everything.
+    """
+    if not carrier_map:
+        return True
+    return carrier_map.get(str(a), CARRIER_UNKNOWN) == carrier_map.get(str(b), CARRIER_UNKNOWN)
+
+
+def scope_neighbors_by_carrier(neighbors, carrier_map):
+    """Drop cross-carrier edges from a neighbour graph.
+
+    Used for collision / mod-N / RSI checks.  NOT used for confusion: a cell
+    on one carrier can legitimately have inter-frequency neighbours on another,
+    and two of those neighbours sharing a PCI is a real confusion on THEIR
+    carrier — so confusion traverses the full graph and only requires the
+    ambiguous pair to share a carrier.
+    """
+    if not carrier_map:
+        return neighbors
+    out = defaultdict(set)
+    for c, nbs in neighbors.items():
+        cc = carrier_map.get(str(c), CARRIER_UNKNOWN)
+        for nb in nbs:
+            if carrier_map.get(str(nb), CARRIER_UNKNOWN) == cc:
+                out[str(c)].add(str(nb))
+    return out
+
+
+def split_sector_groups_by_carrier(sector_groups, cell_to_sector, carrier_map):
+    """Split each sector group so every carrier gets its own PCI decision.
+
+    'sector' planning scope keeps the groups as they are: one PCI for the whole
+    physical sector across all of its carriers.  'carrier' scope calls this, so
+    a sector's 3500 MHz cells and its 1800 MHz cells are planned independently.
+    """
+    new_groups = {}
+    new_c2s = {}
+    for sec_key, members in sector_groups.items():
+        by_car = defaultdict(list)
+        for m in members:
+            by_car[carrier_map.get(str(m), CARRIER_UNKNOWN)].append(m)
+        for car, cells in by_car.items():
+            key = f'{sec_key}@{car}'
+            new_groups[key] = cells
+            for m in cells:
+                new_c2s[str(m)] = key
+    return new_groups, new_c2s
+
+
 def prach_config_max(technology='LTE'):
     """Highest valid PRACH configuration index for the technology.
 
@@ -1299,9 +1433,11 @@ def build_co_site_set(df, cell_to_sector=None, tolerance_km=0.05):
     return result
 
 
-def detect_collisions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
+def detect_collisions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_attempts=None,
+                      _loc_az_cache=None, carrier_map=None):
     if cell_to_sector is None: cell_to_sector = {}
     if nbr_attempts is None: nbr_attempts = {}
+    if carrier_map is None: carrier_map = {}
     pm = dict(zip(df['cell_id'], df[pci_col]))
     loc_map, az_map = _loc_az_cache if _loc_az_cache else _build_loc_az_maps(df)
     rows, seen = [], set()
@@ -1311,6 +1447,8 @@ def detect_collisions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_att
         for nb in ns:
             np_ = pm.get(nb)
             if np_ is None or pd.isna(np_): continue
+            if not same_carrier(carrier_map, c, nb):
+                continue  # different carrier -> no physical interaction
             p = tuple(sorted([c, nb]))
             if int(cp)==int(np_) and p not in seen:
                 seen.add(p)
@@ -1321,13 +1459,23 @@ def detect_collisions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_att
                 rows.append({'cell_1':c,'cell_2':nb,'pci':int(cp),
                     'distance_km': dist, 'facing': '✅' if facing else '❌',
                     'ho_attempts': att,
+                    'carrier': carrier_map.get(str(c), ''),
                     'type':'COLLISION','severity':'CRITICAL',
                     'description':f'Same PCI {int(cp)} on neighboring cells'})
     return enrich_df_with_sector_info(pd.DataFrame(rows))
 
-def detect_confusions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
+def detect_confusions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_attempts=None,
+                      _loc_az_cache=None, carrier_map=None):
+    """Two neighbours of a common cell sharing a PCI -> handover ambiguity.
+
+    The two ambiguous cells must be on the SAME carrier (a UE can only confuse
+    them if they appear on one frequency).  The common neighbour may be on any
+    carrier: inter-frequency measurements are exactly how a cell reports
+    neighbours on another layer.
+    """
     if cell_to_sector is None: cell_to_sector = {}
     if nbr_attempts is None: nbr_attempts = {}
+    if carrier_map is None: carrier_map = {}
     pm = dict(zip(df['cell_id'], df[pci_col]))
     loc_map, az_map = _loc_az_cache if _loc_az_cache else _build_loc_az_maps(df)
     rows, seen = [], set()
@@ -1340,8 +1488,12 @@ def detect_confusions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_att
             if len(cs) > 1:
                 for i in range(len(cs)):
                     for j in range(i+1, len(cs)):
+                        if not same_carrier(carrier_map, cs[i], cs[j]):
+                            continue  # ambiguity only exists within one carrier
                         co = (cell_to_sector.get(str(cs[i]), '__A') == cell_to_sector.get(str(cs[j]), '__B')
                               and cell_to_sector.get(str(cs[i])) is not None)
+                        if not co:
+                            co = _is_co_sector_by_id(str(cs[i]), str(cs[j]))
                         if co:
                             continue  # co-sector cells share PCI by design – skip
                         t = tuple(sorted([cs[i],cs[j]])+[ca])
@@ -1357,15 +1509,18 @@ def detect_confusions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_att
                             att = max(att1, att2) if (att1 or att2) else ''
                             rows.append({'cell_1':cs[i],'cell_2':cs[j],
                                 'common_neighbor':ca,'pci':pv,
+                                'carrier': carrier_map.get(str(cs[i]), ''),
                                 'distance_km': dist, 'facing': '✅' if facing else '❌',
                                 'ho_attempts': att,
                                 'type':'CONFUSION','severity':'HIGH',
                                 'description':f'PCI {pv} shared, both neighbors of {ca} → handover ambiguity'})
     return enrich_df_with_sector_info(pd.DataFrame(rows))
 
-def _mod_conflict(df, neighbors, pci_col, mod, ctype, sev, desc, cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
+def _mod_conflict(df, neighbors, pci_col, mod, ctype, sev, desc, cell_to_sector=None,
+                  nbr_attempts=None, _loc_az_cache=None, carrier_map=None):
     if cell_to_sector is None: cell_to_sector = {}
     if nbr_attempts is None: nbr_attempts = {}
+    if carrier_map is None: carrier_map = {}
     pm = dict(zip(df['cell_id'], df[pci_col]))
     loc_map, az_map = _loc_az_cache if _loc_az_cache else _build_loc_az_maps(df)
     rows, seen = [], set()
@@ -1375,6 +1530,8 @@ def _mod_conflict(df, neighbors, pci_col, mod, ctype, sev, desc, cell_to_sector=
         for nb in ns:
             np_ = pm.get(nb)
             if np_ is None or pd.isna(np_): continue
+            if not same_carrier(carrier_map, c, nb):
+                continue  # different carrier -> no physical interaction
             p = tuple(sorted([c, nb]))
             if int(cp)%mod == int(np_)%mod and p not in seen:
                 seen.add(p)
@@ -1384,29 +1541,37 @@ def _mod_conflict(df, neighbors, pci_col, mod, ctype, sev, desc, cell_to_sector=
                 att = nbr_attempts.get(p, '')
                 rows.append({'cell_1':c,'cell_2':nb,'pci_1':int(cp),'pci_2':int(np_),
                     f'mod{mod}_value':int(cp)%mod,
+                    'carrier': carrier_map.get(str(c), ''),
                     'distance_km': dist, 'facing': '✅' if facing else '❌',
                     'ho_attempts': att,
                     'type':ctype,'severity':sev,
                     'description':f'PCI {int(cp)} mod{mod}={int(cp)%mod} vs PCI {int(np_)} mod{mod}={int(np_)%mod} → {desc}'})
     return enrich_df_with_sector_info(pd.DataFrame(rows))
 
-def detect_mod3_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
-    return _mod_conflict(df, nb, pci, 3, 'MOD3_CONFLICT', 'MEDIUM', 'PSS interference', cell_to_sector, nbr_attempts, _loc_az_cache)
-def detect_mod4_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
-    """NR SSB DMRS interference: PCI mod 4 collision (3GPP TS 38.211 §7.4.1.1.1)."""
-    return _mod_conflict(df, nb, pci, 4, 'MOD4_CONFLICT', 'MEDIUM', 'SSB DMRS interference (NR)', cell_to_sector, nbr_attempts, _loc_az_cache)
-def detect_mod6_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
-    return _mod_conflict(df, nb, pci, 6, 'MOD6_CONFLICT', 'LOW', 'RS mapping conflict', cell_to_sector, nbr_attempts, _loc_az_cache)
-def detect_mod30_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
-    return _mod_conflict(df, nb, pci, 30, 'MOD30_CONFLICT', 'LOW', 'PCFICH/PHICH conflict', cell_to_sector, nbr_attempts, _loc_az_cache)
+def detect_mod3_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None, carrier_map=None):
+    return _mod_conflict(df, nb, pci, 3, 'MOD3_CONFLICT', 'MEDIUM', 'PSS interference', cell_to_sector, nbr_attempts, _loc_az_cache, carrier_map)
+def detect_mod4_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None, carrier_map=None):
+    """NR PBCH DMRS interference: the DMRS subcarrier offset is PCI mod 4
+    (3GPP TS 38.211 §7.4.1.4.1)."""
+    return _mod_conflict(df, nb, pci, 4, 'MOD4_CONFLICT', 'MEDIUM', 'SSB DMRS interference (NR)', cell_to_sector, nbr_attempts, _loc_az_cache, carrier_map)
+def detect_mod6_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None, carrier_map=None):
+    """LTE CRS frequency shift v_shift = PCI mod 6 (3GPP TS 36.211 §6.10.1.2)."""
+    return _mod_conflict(df, nb, pci, 6, 'MOD6_CONFLICT', 'LOW', 'CRS frekans kayması (v_shift) çakışması', cell_to_sector, nbr_attempts, _loc_az_cache, carrier_map)
+def detect_mod30_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None, carrier_map=None):
+    """Uplink DM-RS / SRS base-sequence group: u depends on PCI mod 30
+    (LTE TS 36.211 §5.5.1.3, NR TS 38.211 §6.3.1.1 / §6.4.1.3).
+    NOT PCFICH/PHICH — those map by PCI mod 2*N_RB."""
+    return _mod_conflict(df, nb, pci, 30, 'MOD30_CONFLICT', 'LOW', 'UL DM-RS / SRS dizi grubu çakışması', cell_to_sector, nbr_attempts, _loc_az_cache, carrier_map)
 
 # ============================================================
 # RSI Conflict (Cell-Range-Aware)
 # ============================================================
-def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_to_sector=None, nbr_attempts=None, _loc_az_cache=None):
+def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_to_sector=None,
+                          nbr_attempts=None, _loc_az_cache=None, carrier_map=None):
     technology = norm_tech(technology)  # UI = tek otorite
     if cell_to_sector is None: cell_to_sector = {}
     if nbr_attempts is None: nbr_attempts = {}
+    if carrier_map is None: carrier_map = {}
     if rsi_col not in df.columns: return pd.DataFrame()
     rm = dict(zip(df['cell_id'], df[rsi_col]))
     nm = {}   # cell_id -> Ncs
@@ -1429,6 +1594,8 @@ def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_t
         for nb in ns:
             nr_ = rm.get(nb)
             if nr_ is None or pd.isna(nr_): continue
+            if not same_carrier(carrier_map, c, nb):
+                continue  # PRACH is per-carrier: no cross-carrier root clash
             nn = nm.get(nb, 13)
             p = tuple(sorted([c, nb]))
             if p in seen: continue
@@ -1439,6 +1606,8 @@ def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_t
                 continue  # co-sector cells share RSI by design – skip
             c_nzc = nzm.get(c, NZC_LONG)
             nb_nzc = nzm.get(nb, NZC_LONG)
+            if c_nzc != nb_nzc:
+                continue  # different L_RA -> different PRACH numerology, cannot clash
             # Use the larger Nzc for overlap check (conservative)
             overlap_nzc = max(c_nzc, nb_nzc)
             # Per-cell max_rsi for wrapping
@@ -1453,6 +1622,7 @@ def detect_rsi_collisions(df, neighbors, rsi_col='rsi', technology='LTE', cell_t
                 rows.append({
                     'cell_1':c,'cell_2':nb,'rsi_1':int(cr),'rsi_2':int(nr_),
                     'ncs_1':cn,'ncs_2':nn,'roots_cell_1':r1,'roots_cell_2':r2,
+                    'carrier': carrier_map.get(str(c), ''),
                     'rsi_range_1':f'{int(cr)}-{(int(cr)+r1-1)%pair_mx}',
                     'rsi_range_2':f'{int(nr_)}-{(int(nr_)+r2-1)%pair_mx}',
                     'distance_km': dist, 'facing': '✅' if facing else '❌',
@@ -1563,7 +1733,7 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
                       check_mod30=True, check_rsi=True,
                       include_intra_site=True, external_neighbors=None,
                       cell_to_sector=None, progress_callback=None,
-                      check_mod4=False):
+                      check_mod4=False, carrier_map=None):
     technology = norm_tech(technology)  # UI = tek otorite
     def _prog(pct, msg=''):
         if progress_callback:
@@ -1582,24 +1752,33 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
                                                     external_neighbors)
     c2s = cell_to_sector or {}
     na = nbr_attempts
+    # Carrier scoping (K-1): a conflict only exists between cells on the same
+    # carrier.  With no carrier information every cell resolves to the same
+    # bucket, so this reduces exactly to the previous behaviour.
+    cm = carrier_map if carrier_map is not None else build_carrier_map(df)
     # Build location/azimuth maps ONCE for all detection functions
     _lac = _build_loc_az_maps(df)
     _prog(20, 'Collision tespiti...')
-    col = detect_collisions(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac)
+    col = detect_collisions(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm)
     _prog(35, 'Confusion tespiti...')
-    con = detect_confusions(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac)
+    con = detect_confusions(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm)
     _prog(50, 'Mod3 kontrolü...')
-    m3 = detect_mod3_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac) if check_mod3 else pd.DataFrame()
+    m3 = detect_mod3_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_mod3 else pd.DataFrame()
     _prog(55, 'Mod4 kontrolü (NR SSB DMRS)...')
-    m4 = detect_mod4_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac) if check_mod4 else pd.DataFrame()
+    m4 = detect_mod4_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_mod4 else pd.DataFrame()
     _prog(60, 'Mod6 kontrolü...')
-    m6 = detect_mod6_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac) if check_mod6 else pd.DataFrame()
+    m6 = detect_mod6_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_mod6 else pd.DataFrame()
     _prog(70, 'Mod30 kontrolü...')
-    m30 = detect_mod30_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac) if check_mod30 else pd.DataFrame()
+    m30 = detect_mod30_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_mod30 else pd.DataFrame()
     _prog(80, 'RSI çakışma tespiti...')
-    rsi = detect_rsi_collisions(df, nb, 'rsi', technology, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac) if check_rsi else pd.DataFrame()
+    rsi = detect_rsi_collisions(df, nb, 'rsi', technology, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_rsi else pd.DataFrame()
     _prog(90, 'Skor hesaplanıyor...')
-    tc, tn = len(df), sum(len(v) for v in nb.values())//2
+    tc = len(df)
+    # Neighbour pairs: the full graph, and the same-carrier subset that the
+    # mod-N random baseline has to be measured against.
+    tn_all = sum(len(v) for v in nb.values())//2
+    tn = sum(1 for c, nbs in nb.items() for x in nbs if same_carrier(cm, c, x))//2
+    n_car, n_unknown, car_counts = carrier_report(cm)
     mp = pci_count(technology)
 
     # Count neighbor sources
@@ -1635,7 +1814,37 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
     hs = compute_health_score(len(col), len(con), len(m3), len(m6), len(m30), len(rsi), tn,
                               n_cells=tc, m4_count=len(m4), technology=technology)
 
+    # Per-carrier breakdown: the same formula applied to each frequency layer
+    # on its own.  A blended figure hides a layer that is in trouble.
+    per_carrier = []
+    _car_order = sorted(k for k in car_counts if k != CARRIER_UNKNOWN)
+    if CARRIER_UNKNOWN in car_counts:
+        _car_order.append(CARRIER_UNKNOWN)
+    for car in _car_order:
+        cells_c = {cid for cid, v in cm.items() if v == car}
+        pairs_c = sum(1 for c, nbs in nb.items() if str(c) in cells_c
+                      for x in nbs if str(x) in cells_c)//2
+
+        def _cnt(tbl, _cc=cells_c):
+            if len(tbl) == 0:
+                return 0
+            return int(((tbl['cell_1'].astype(str).isin(_cc)) &
+                        (tbl['cell_2'].astype(str).isin(_cc))).sum())
+        c_col, c_con = _cnt(col), _cnt(con)
+        c_m3, c_m4 = _cnt(m3), _cnt(m4)
+        c_m6, c_m30, c_rsi = _cnt(m6), _cnt(m30), _cnt(rsi)
+        per_carrier.append({
+            'carrier': car, 'cells': len(cells_c), 'neighbor_pairs': pairs_c,
+            'collision': c_col, 'confusion': c_con, 'mod3': c_m3, 'mod4': c_m4,
+            'mod6': c_m6, 'mod30': c_m30, 'rsi': c_rsi,
+            'health_score': compute_health_score(
+                c_col, c_con, c_m3, c_m6, c_m30, c_rsi, pairs_c,
+                n_cells=len(cells_c), m4_count=c_m4, technology=technology)})
+
     s = {'technology':technology,'total_cells':tc,'total_neighbor_pairs':tn,
+         'total_neighbor_pairs_all_layers': tn_all,
+         'carrier_count': n_car, 'cells_without_carrier': n_unknown,
+         'carrier_cells': car_counts, 'per_carrier': per_carrier,
          'max_pci_range':f'0-{mp-1}','search_radius_km':radius_km,
          'collision_count':len(col),'confusion_count':len(con),
          'mod3_conflict_count':len(m3),'mod4_conflict_count':len(m4),
@@ -1656,7 +1865,7 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
             'collisions':col,'confusions':con,
             'mod3_conflicts':m3,'mod4_conflicts':m4,
             'mod6_conflicts':m6,'mod30_conflicts':m30,
-            'rsi_collisions':rsi,'summary':s}
+            'rsi_collisions':rsi,'carrier_map':cm,'summary':s}
 
 def build_neighbor_table(df, neighbors, nbr_sources=None, nbr_attempts=None):
     rows = []
@@ -1707,7 +1916,7 @@ def _pci_is_clean_ex(pci_candidate, cell_id, neighbors, pci_map,
                      check_mod3=True, check_mod6=True, check_mod30=True,
                      check_confusion=True, cell_to_sector=None,
                      co_site_set=None, check_mod4=False,
-                     enforce_co_site_mod3=True):
+                     enforce_co_site_mod3=True, carrier_map=None):
     """Return True if pci_candidate causes NO conflict for cell_id among its neighbors.
        Optionally checks 2nd-ring neighbours for confusion.
        Skips co-sector neighbours (same site+azimuth).
@@ -1718,11 +1927,15 @@ def _pci_is_clean_ex(pci_candidate, cell_id, neighbors, pci_map,
         cell_to_sector = {}
     if co_site_set is None:
         co_site_set = set()
+    if carrier_map is None:
+        carrier_map = {}
     my_sector = cell_to_sector.get(str(cell_id))
     for nb in neighbors.get(cell_id, set()):
         # Skip co-sector neighbours
         if my_sector is not None and cell_to_sector.get(str(nb)) == my_sector:
             continue
+        if not same_carrier(carrier_map, cell_id, nb):
+            continue  # different carrier -> no collision / mod-N binding
         nb_pci = pci_map.get(nb)
         if nb_pci is None or pd.isna(nb_pci):
             continue
@@ -1754,6 +1967,8 @@ def _pci_is_clean_ex(pci_candidate, cell_id, neighbors, pci_map,
                 # Skip if nb2 is co-sector with the candidate cell
                 if my_sector is not None and cell_to_sector.get(str(nb2)) == my_sector:
                     continue
+                if not same_carrier(carrier_map, cell_id, nb2):
+                    continue  # ambiguity lives within one carrier
                 nb2_pci = pci_map.get(nb2)
                 if nb2_pci is not None and not pd.isna(nb2_pci) and int(nb2_pci) == pci_candidate:
                     return False
@@ -1761,7 +1976,8 @@ def _pci_is_clean_ex(pci_candidate, cell_id, neighbors, pci_map,
 
 
 def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
-                  technology='LTE', cell_to_sector=None, nzc_map=None):
+                  technology='LTE', cell_to_sector=None, nzc_map=None,
+                  carrier_map=None):
     """Return True if rsi_candidate causes NO RSI overlap for cell_id.
        Skips co-sector neighbours.
     """
@@ -1770,12 +1986,16 @@ def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
         cell_to_sector = {}
     if nzc_map is None:
         nzc_map = {}
+    if carrier_map is None:
+        carrier_map = {}
     my_sector = cell_to_sector.get(str(cell_id))
     mx = rsi_count(technology)
     cell_nzc = nzc_map.get(str(cell_id), NZC_LONG)
     for nb in neighbors.get(cell_id, set()):
         if my_sector is not None and cell_to_sector.get(str(nb)) == my_sector:
             continue
+        if not same_carrier(carrier_map, cell_id, nb):
+            continue  # PRACH is per-carrier
         nb_rsi = rsi_map.get(nb)
         if nb_rsi is None or pd.isna(nb_rsi):
             continue
@@ -1792,7 +2012,7 @@ def suggest_pci(df, neighbors, results, technology='LTE',
                 check_mod3=True, check_mod6=True, check_mod30=True,
                 sector_groups=None, cell_to_sector=None,
                 nbr_attempts=None, check_mod4=False,
-                progress_fn=None):
+                progress_fn=None, carrier_map=None, planning_scope='sector'):
     """For every cell with a PCI problem, suggest a clean replacement PCI.
 
     Uses **pre-computed forbidden sets** for O(1) per-candidate checks
@@ -1817,6 +2037,10 @@ def suggest_pci(df, neighbors, results, technology='LTE',
     if sector_groups is None: sector_groups = {}
     if cell_to_sector is None: cell_to_sector = {}
     if nbr_attempts is None: nbr_attempts = {}
+    if carrier_map is None: carrier_map = build_carrier_map(df)
+    if planning_scope == 'carrier':
+        sector_groups, cell_to_sector = split_sector_groups_by_carrier(
+            sector_groups, cell_to_sector, carrier_map)
 
     co_site_set = build_co_site_set(df, cell_to_sector)
 
@@ -1935,18 +2159,24 @@ def suggest_pci(df, neighbors, results, technology='LTE',
                 if npci is None or pd.isna(npci):
                     continue
                 npci = int(npci)
-                col_set.add(npci)
-                if frozenset((str(cc), str(nb))) in co_site_set:
-                    cs_m3.add(npci % 3)
-                m3.add(npci % 3)
-                m4.add(npci % 4)
-                m6.add(npci % 6)
-                m30.add(npci % 30)
-                # 2-hop for confusion
+                # Collision / mod-N only bind within one carrier (K-1).
+                if same_carrier(carrier_map, cc, nb):
+                    col_set.add(npci)
+                    if frozenset((str(cc), str(nb))) in co_site_set:
+                        cs_m3.add(npci % 3)
+                    m3.add(npci % 3)
+                    m4.add(npci % 4)
+                    m6.add(npci % 6)
+                    m30.add(npci % 30)
+                # 2-hop for confusion: the intermediate cell may sit on any
+                # carrier (inter-frequency neighbour), but the two ambiguous
+                # cells must share one.
                 for nb2 in neighbors.get(nb, set()):
                     if nb2 in check_set:
                         continue
                     if my_sec is not None and cell_to_sector.get(str(nb2)) == my_sec:
+                        continue
+                    if not same_carrier(carrier_map, cc, nb2):
                         continue
                     n2pci = wpci.get(nb2)
                     if n2pci is not None and not pd.isna(n2pci):
@@ -2217,7 +2447,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                                         check_mod3=True, check_mod6=True,
                                         check_mod30=True,
                                         sector_groups=None, cell_to_sector=None,
-                                        check_mod4=False):
+                                        check_mod4=False, carrier_map=None):
     """Find optimal PCI and RSI for new cells being added to an existing network.
 
     existing_df: DataFrame of existing network cells (with pci, rsi, lat, lon, etc.)
@@ -2275,6 +2505,8 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
 
     # Normalize neighbours to strings
     neighbors = {str(k): {str(v) for v in vs} for k, vs in nb_all.items()}
+    if carrier_map is None:
+        carrier_map = build_carrier_map(combined)
 
     # Re-run sector group detection on combined network so new cells
     # get proper co-sector / co-site handling
@@ -2319,14 +2551,18 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
             if my_sector is not None and cell_to_sector.get(str(nb)) == my_sector:
                 continue
             npci = working_pci.get(nb)
-            if npci is not None:
+            # Collision / mod-N bind only within the new cell's carrier (K-1)
+            if npci is not None and same_carrier(carrier_map, cid, nb):
                 nb_mod3s.add(npci % 3)
                 used_pcis.add(npci)
-            # 2-hop for confusion
+            # 2-hop for confusion: intermediate cell may be on any carrier,
+            # the ambiguous pair must share one
             for nb2 in neighbors.get(nb, set()):
                 if nb2 == cid:
                     continue
                 if my_sector is not None and cell_to_sector.get(str(nb2)) == my_sector:
+                    continue
+                if not same_carrier(carrier_map, cid, nb2):
                     continue
                 n2pci = working_pci.get(nb2)
                 if n2pci is not None:
@@ -2386,7 +2622,8 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         for rsi_cand in range(0, max_rsi):
             if _rsi_is_clean(rsi_cand, cell_ncs, cid, neighbors,
                              working_rsi, ncs_map, technology,
-                             cell_to_sector=cell_to_sector, nzc_map=nzc_map):
+                             cell_to_sector=cell_to_sector, nzc_map=nzc_map,
+                         carrier_map=carrier_map):
                 found_rsi = rsi_cand
                 break
 
@@ -2444,7 +2681,8 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                               check_mod3=True, check_mod6=True,
                               check_mod30=True, check_mod4=False,
                               sector_groups=None, cell_to_sector=None,
-                              rescan_pci=True, rescan_rsi=True):
+                              rescan_pci=True, rescan_rsi=True,
+                              carrier_map=None, planning_scope='sector'):
     """Re-optimise PCI and/or RSI **only** for *target_cell_ids* while keeping
     the rest of the network fixed.
 
@@ -2456,6 +2694,10 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
     technology = norm_tech(technology)  # UI = tek otorite
     if sector_groups is None: sector_groups = {}
     if cell_to_sector is None: cell_to_sector = {}
+    if carrier_map is None: carrier_map = build_carrier_map(df)
+    if planning_scope == 'carrier':
+        sector_groups, cell_to_sector = split_sector_groups_by_carrier(
+            sector_groups, cell_to_sector, carrier_map)
 
     # Technology-aware mod switching
     if technology == 'NR':
@@ -2525,14 +2767,16 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                 npci = wpci.get(nb)
                 if npci is None or pd.isna(npci): continue
                 npci = int(npci)
-                col_set.add(npci)
-                if frozenset((str(cc), str(nb))) in co_site_set:
-                    cs_m3.add(npci % 3)
-                m3.add(npci % 3); m4.add(npci % 4)
-                m6.add(npci % 6); m30.add(npci % 30)
+                if same_carrier(carrier_map, cc, nb):   # K-1
+                    col_set.add(npci)
+                    if frozenset((str(cc), str(nb))) in co_site_set:
+                        cs_m3.add(npci % 3)
+                    m3.add(npci % 3); m4.add(npci % 4)
+                    m6.add(npci % 6); m30.add(npci % 30)
                 for nb2 in str_neighbors.get(nb, set()):
                     if nb2 in check_set: continue
                     if my_sec is not None and cell_to_sector.get(str(nb2)) == my_sec: continue
+                    if not same_carrier(carrier_map, cc, nb2): continue
                     n2pci = wpci.get(nb2)
                     if n2pci is not None and not pd.isna(n2pci):
                         conf_set.add(int(n2pci))
@@ -2679,7 +2923,8 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
             for rsi_cand in range(0, max_rsi):
                 if _rsi_is_clean(rsi_cand, cell_ncs, cid, str_neighbors,
                                  working_rsi, ncs_map, technology,
-                                 cell_to_sector=cell_to_sector, nzc_map=nzc_map):
+                                 cell_to_sector=cell_to_sector, nzc_map=nzc_map,
+                         carrier_map=carrier_map):
                     found_rsi = rsi_cand
                     break
 
@@ -2724,7 +2969,7 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
 
 def suggest_rsi(df, neighbors, results, technology='LTE',
                sector_groups=None, cell_to_sector=None,
-               progress_fn=None):
+               progress_fn=None, carrier_map=None, planning_scope='sector'):
     """For every cell with an RSI problem, suggest a clean replacement RSI.
 
     If sector_groups is provided, co-sector cells (same site + same azimuth)
@@ -2738,6 +2983,11 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
         sector_groups = {}
     if cell_to_sector is None:
         cell_to_sector = {}
+    if carrier_map is None:
+        carrier_map = build_carrier_map(df)
+    if planning_scope == 'carrier':
+        sector_groups, cell_to_sector = split_sector_groups_by_carrier(
+            sector_groups, cell_to_sector, carrier_map)
 
     rsi_tbl = results.get('rsi_collisions', pd.DataFrame())
     if len(rsi_tbl) == 0:
@@ -2786,7 +3036,8 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
 
         # Already clean after earlier fix?
         if _rsi_is_clean(cur, cell_ncs, cell_id, neighbors, working_rsi, ncs_map, technology,
-                         cell_to_sector=cell_to_sector, nzc_map=nzc_map):
+                         cell_to_sector=cell_to_sector, nzc_map=nzc_map,
+                         carrier_map=carrier_map):
             continue
 
         # Try RSI values starting from 0, skip current
@@ -2796,7 +3047,8 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
                 continue
             if _rsi_is_clean(candidate, cell_ncs, cell_id, neighbors,
                              working_rsi, ncs_map, technology,
-                             cell_to_sector=cell_to_sector, nzc_map=nzc_map):
+                             cell_to_sector=cell_to_sector, nzc_map=nzc_map,
+                         carrier_map=carrier_map):
                 found = candidate
                 break
 
@@ -2874,7 +3126,8 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
 # ============================================================
 def plan_rsi_network(df, neighbors, technology='LTE',
                      sector_groups=None, cell_to_sector=None,
-                     progress_callback=None):
+                     progress_callback=None,
+                     carrier_map=None, planning_scope='sector'):
     """Assign RSI values to ALL cells from scratch using cell-range-aware planning.
 
     If sector_groups is provided, co-sector cells (same site + same azimuth)
@@ -2900,6 +3153,14 @@ def plan_rsi_network(df, neighbors, technology='LTE',
         sector_groups = {}
     if cell_to_sector is None:
         cell_to_sector = {}
+    if carrier_map is None:
+        carrier_map = build_carrier_map(df)
+    if planning_scope == 'carrier':
+        sector_groups, cell_to_sector = split_sector_groups_by_carrier(
+            sector_groups, cell_to_sector, carrier_map)
+    # PRACH lives on one carrier: root sequences of cells on different
+    # carriers can never overlap, so the graph is scoped unconditionally.
+    neighbors = scope_neighbors_by_carrier(neighbors, carrier_map)
 
     max_rsi = rsi_count(technology)
 
@@ -3192,7 +3453,8 @@ def plan_pci_network(df, neighbors, technology='LTE',
                      nbr_attempts=None, progress_callback=None,
                      check_mod4=False,
                      sa_iterations_override=0,
-                     reserved_pci_start=None, reserved_pci_end=None):
+                     reserved_pci_start=None, reserved_pci_end=None,
+                     carrier_map=None, planning_scope='sector'):
     """Assign PCI values using **Constrained Simulated Annealing** optimisation.
 
     Algorithm (based on professional PCI planning tool research):
@@ -3223,6 +3485,17 @@ def plan_pci_network(df, neighbors, technology='LTE',
         cell_to_sector = {}
     if nbr_attempts is None:
         nbr_attempts = {}
+    if carrier_map is None:
+        carrier_map = build_carrier_map(df)
+    if planning_scope not in PLANNING_SCOPES:
+        raise ValueError(f"planning_scope '{planning_scope}' gecersiz; "
+                         f"secenekler: {PLANNING_SCOPES}")
+    # 'carrier' scope: every carrier of a sector gets its own PCI decision.
+    # 'sector' scope (default): one PCI for the whole physical sector across
+    # all of its carriers — the operator's current strategy.
+    if planning_scope == 'carrier':
+        sector_groups, cell_to_sector = split_sector_groups_by_carrier(
+            sector_groups, cell_to_sector, carrier_map)
 
     # Technology-aware: NR uses mod4, LTE uses mod6/mod30
     if technology == 'NR':
@@ -3333,10 +3606,19 @@ def plan_pci_network(df, neighbors, technology='LTE',
                 _co_site_flat.add((b, a))
 
     # Build neighbor lists excluding co-sector (as sets of cell_id strings)
+    # Carrier scoping (K-1).  Two adjacency views are needed:
+    #   nb_excl_cosector - SAME-carrier neighbours.  Collision, mod-N and
+    #     co-site PSS checks only make sense within one carrier.
+    #   nb_conf - ALL-carrier neighbours, used only for the confusion
+    #     traversal: a cell legitimately reports inter-frequency neighbours,
+    #     and two of those sharing a PCI is a real ambiguity on THEIR carrier.
+    #     _cell_energy still requires the ambiguous pair to share a carrier.
     nb_excl_cosector = {}
+    nb_conf = {}
     for cid in cell_ids:
         my_sec = cell_to_sector.get(cid)
         nbs = set()
+        nbs_all = set()
         for nb in neighbors.get(cid, set()):
             nb_id = str(nb)
             # Exclude co-sector: naming convention (primary) + cell_to_sector (fallback)
@@ -3344,9 +3626,13 @@ def plan_pci_network(df, neighbors, technology='LTE',
                 continue
             if my_sec and cell_to_sector.get(nb_id) == my_sec:
                 continue
-            nbs.add(nb_id)
+            nbs_all.add(nb_id)
+            if same_carrier(carrier_map, cid, nb_id):
+                nbs.add(nb_id)
         nbs.discard(cid)  # never be neighbor of yourself
+        nbs_all.discard(cid)
         nb_excl_cosector[cid] = nbs
+        nb_conf[cid] = nbs_all
 
     # Reverse-PCI index for efficient confusion detection.
     # Instead of pre-building O(N*D^2) 2-hop sets, maintain a live
@@ -3710,18 +3996,22 @@ def plan_pci_network(df, neighbors, technology='LTE',
             same_pci = pci_to_cells.get(pci_val)
             if same_pci and len(same_pci) > 1:
                 my_sec = cell_to_sector.get(cid)
-                my_nbs = nb_excl_cosector.get(cid, _EMPTY)
+                my_nbs = nb_conf.get(cid, _EMPTY)
                 for nb_id in my_nbs:
-                    nb_nbs = nb_excl_cosector.get(nb_id, _EMPTY)
+                    nb_nbs = nb_conf.get(nb_id, _EMPTY)
                     # Use smaller set for intersection check
                     if len(same_pci) < len(nb_nbs):
                         for c2 in same_pci:
                             if c2 != cid and c2 in nb_nbs:
+                                if not same_carrier(carrier_map, cid, c2):
+                                    continue  # ambiguity lives within one carrier
                                 if not (my_sec and cell_to_sector.get(c2) == my_sec):
                                     e += W_CONFUSION
                     else:
                         for c2 in nb_nbs:
                             if c2 != cid and c2 in same_pci:
+                                if not same_carrier(carrier_map, cid, c2):
+                                    continue
                                 if not (my_sec and cell_to_sector.get(c2) == my_sec):
                                     e += W_CONFUSION
         return e

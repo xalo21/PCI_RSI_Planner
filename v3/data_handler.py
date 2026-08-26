@@ -120,7 +120,12 @@ COLUMN_ALIASES = {
     'rsi': ['rsi','root_sequence_index','rootsequenceindex','prach_rsi','prachrootsequenceindex'],
     'beamwidth': ['beamwidth','beam_width','hbw','horizontal_beamwidth','huzme'],
     'technology': ['technology','tech','rat','teknoloji','network_type'],
-    'band': ['band','frequency_band','frekans','earfcn','nrarfcn'],
+    'band': ['band','frequency_band','frekans','band_mhz','freq_band'],
+    # Explicit carrier frequency.  This is the only reliable carrier key: a
+    # band alone cannot separate two carriers within the same band, and the
+    # cell-ID prefix cannot either.  Kept separate from 'band' on purpose.
+    'earfcn': ['earfcn','arfcn','nrarfcn','nr_arfcn','dl_earfcn','earfcn_dl',
+               'ssb_arfcn','arfcn_dl','carrier','carrier_id','frekans_kanali'],
     'sector': ['sector','sector_id','sektor','sektör','sector_no','sektor_no','sektör_no','sektor_id','sektör_id'],
     'tac': ['tac','tracking_area_code','lac'],
     'prach_config_index': ['prach_config_index','prachconfigindex','prach_config','prachconfig',
