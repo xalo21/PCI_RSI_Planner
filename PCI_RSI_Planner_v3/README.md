@@ -2,13 +2,15 @@
 
 3GPP TS 36.211 / 38.211 / 38.331'e göre 4G ve 5G PCI ve PRACH RSI planlama aracı.
 
-Üst klasördeki v2 dokunulmadan duruyor (`v2.0` etiketi) — ikisi aynı anda
-çalışabilir.
+Kardeş klasördeki v2 dokunulmadan duruyor — ikisi aynı anda çalışabilir ve üst
+klasördeki tek sanal ortamı paylaşır.
 
 ```
-run_v3.bat        ->  http://localhost:8502
-..\run.bat        ->  http://localhost:8501   (v2, donmuş)
+run_v3.bat                     ->  http://localhost:8502
+..\PCI_RSI_Planner_v2\run.bat  ->  http://localhost:8501   (donmuş)
 ```
+
+Kurulum bir kez, üst klasörde: `..\setup.bat` (çevrimdışı, `wheels/` içinden).
 
 ## v2'den farkı
 
