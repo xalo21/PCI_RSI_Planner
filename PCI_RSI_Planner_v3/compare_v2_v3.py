@@ -23,7 +23,8 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-V2 = os.path.dirname(HERE)
+# v2 kardes klasorde durur; ikisi de ust klasordeki .venv'i paylasir.
+V2 = os.path.join(os.path.dirname(HERE), 'PCI_RSI_Planner_v2')
 
 # v3'un kolon adi normalizasyonunu kullan (v2'ninkiyle ayni)
 sys.path.insert(0, HERE)
