@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Offline pip wheel cache used by setup.bat (~90 MB of binaries).
+# Not tracked: it is a build input, not source. setup.bat still works locally.
+wheels/
+
+# Editor / tooling
+.claude/
+.vscode/
+.idea/
+
+# Excel outputs and scratch files
+*.xlsx
+!ornek_*.xlsx
+~$*

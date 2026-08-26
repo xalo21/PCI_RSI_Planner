@@ -1,0 +1,38 @@
+# ============================================================
+# TürkTelekom PCI/RSI Planner - Python 3.14 Uyumlu Gereksinimler
+# ============================================================
+#
+# Kurulum:
+#   python -m venv .venv
+#   .venv\Scripts\activate        (Windows)
+#   source .venv/bin/activate     (Linux/Mac)
+#   pip install -r requirements.txt
+#
+# Çalıştırma:
+#   streamlit run app.py
+#
+# Test:
+#   pytest test_engine.py -v
+# ============================================================
+
+streamlit==1.55.0
+
+# Veri işleme
+pandas==2.3.3
+numpy==2.4.3
+openpyxl==3.1.5
+xlsxwriter==3.2.9
+pyarrow==23.0.1
+
+# Harita
+folium==0.20.0
+streamlit-folium==0.27.0
+
+# Grafik
+plotly==6.6.0
+
+# Coğrafi hesaplama
+geopy==2.4.1
+
+# Test
+pytest==9.0.2
