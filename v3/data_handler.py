@@ -133,9 +133,14 @@ COLUMN_ALIASES = {
     'zero_correlation_zone': ['zero_correlation_zone','zerocorrelationzoneconfig','zcz',
                               'zerocorrelationzone','ncs_config',
                               'zero_correlation_zone_config','prach_cs','prachcs','prach_ncs'],
+    # highSpeedFlag (LTE) / restrictedSetConfig (NR). Read as a VALUE, not a
+    # flag: 0/unrestricted, 1/typeA, typeB — the two restricted sets have
+    # different Ncs tables from zcz=11 up.
     'high_speed': ['high_speed','highspeedflag','high_speed_flag','highspeed',
-                   'restricted_set','restrictedset','restricted_set_config',
+                   'restricted_set','restrictedset','restrictedsetconfig',
                    'prach_high_speed','speed_flag','hsflag'],
+    'restricted_set_config': ['restricted_set_config','restrictedset_config',
+                              'restricted_set_type','restrictedsettype'],
     # FDD/TDD. Optional: derived from the band when absent, this is the override.
     'duplex': ['duplex','duplex_mode','duplexmode','fdd_tdd','duplekx','duplex_type'],
     # msg1-SubcarrierSpacing (TS 38.331). Only matters for NR short preambles
@@ -312,6 +317,66 @@ def validate_data(df, technology='LTE'):
         max_pcfg = prach_config_max(technology)
         iv = ((df['prach_config_index'].dropna()<0)|(df['prach_config_index'].dropna()>max_pcfg)).sum()
         if iv > 0: errors.append(f"{iv} geçersiz PRACH Config Index (0-{max_pcfg}, {technology})")
+    if 'zero_correlation_zone' in df.columns:
+        z = df['zero_correlation_zone'].dropna()
+        iv = ((z < 0) | (z > 15)).sum()
+        if iv > 0: errors.append(f"{iv} geçersiz zeroCorrelationZoneConfig (0-15)")
+    if 'msg1_scs_khz' in df.columns:
+        v = df['msg1_scs_khz'].dropna()
+        bad = int((~v.isin([15, 30, 60, 120])).sum())
+        if bad > 0:
+            errors.append(f"{bad} geçersiz msg1_scs_khz (15/30/60/120 olmalı)")
+    if 'duplex' in df.columns:
+        v = df['duplex'].dropna().astype(str).str.strip().str.upper()
+        bad = int((~v.isin(['FDD', 'TDD'])).sum())
+        if bad > 0:
+            errors.append(f"{bad} geçersiz duplex değeri (FDD / TDD olmalı)")
+    for _col in ('high_speed', 'restricted_set_config'):
+        if _col in df.columns:
+            from pci_engine import restricted_set_config as _rsc
+            v = df[_col].dropna()
+            bad = 0
+            for x in v:
+                # anlasilmayan bir deger sessizce typeA'ya dusmemeli
+                t = str(x).strip().lower().replace('-', '').replace('_', '').replace(' ', '')
+                if t and t not in ('0', '0.0', '1', '1.0', '2', '2.0', 'true', 'false',
+                                   'yes', 'no', 'evet', 'hayir', 'on', 'off', 'none',
+                                   'unrestricted', 'unrestrictedset', 'a', 'b',
+                                   'typea', 'typeb', 'restricted', 'restricteda',
+                                   'restrictedb', 'restrictedsettypea',
+                                   'restrictedsettypeb', 'high', 'hs', 'highspeed'):
+                    bad += 1
+            if bad:
+                errors.append(f"{bad} satırda anlaşılamayan {_col} değeri "
+                              f"(unrestricted / typeA / typeB bekleniyor)")
+    # RSI araligi L_RA'ya bagli: uzun dizide 0-837, kisada 0-137.
+    if 'rsi' in df.columns and 'prach_config_index' in df.columns:
+        from pci_engine import _prach_params
+        bad_long = bad_short = 0
+        for _, r in df.iterrows():
+            rv = r.get('rsi')
+            if rv is None or pd.isna(rv):
+                continue
+            try:
+                rv = int(rv)
+            except (TypeError, ValueError):
+                continue
+            try:
+                pp = _prach_params(r, technology)
+            except Exception:
+                continue
+            # _prach_params['max_rsi'] is the MODULUS (838 / 138) because
+            # rsi_overlap wraps with it; the highest valid index is one less.
+            hi = pp['max_rsi'] - 1
+            if rv < 0 or rv > hi:
+                if pp['nzc'] == 139:
+                    bad_short += 1
+                else:
+                    bad_long += 1
+        if bad_long:
+            errors.append(f"{bad_long} geçersiz RSI (uzun dizi L=839 için 0-837)")
+        if bad_short:
+            errors.append(f"{bad_short} geçersiz RSI (kısa dizi L=139 için 0-137)")
     return len(errors)==0, errors
 
 
@@ -425,11 +490,19 @@ def generate_sample_excel(technology='LTE'):
     if is_nr:
         # NR: PCI 0-1007, band n78 (3500 MHz), PRACH config 0-255
         data['pci'] = [0,1,2, 3,0,5, 504,505,506, 750,1,800, 900,901,902, 15,16,2]
-        data['rsi'] = [0,10,20, 30,0,50, 60,70,80, 90,100,110, 120,130,140, 150,160,170]
+        # 9-17 kisa preamble (pcfg=30, L=139) -> RSI 0-137 araliginda olmali
+        data['rsi'] = [0,10,20, 30,0,50, 60,70,80, 0,12,24, 36,48,60, 72,84,96]
         data['band'] = [3500]*18
         data['prach_config_index'] = [0]*9 + [30]*9   # 0-27=long, ≥28=short
         data['zero_correlation_zone'] = [5,5,5, 5,5,5, 8,8,8, 3,3,3, 5,5,5, 8,8,8]
         data['cell_range'] = [None]*18  # Huawei: cellRadius (m), None=Nokia modu
+        # Carrier key. Band alone cannot separate two carriers in one band,
+        # so the ARFCN is what the analysis keys on when present.
+        data['earfcn'] = [632628]*9 + [636666]*9      # n78, iki ayri tasiyici
+        data['duplex'] = ['TDD']*18                   # n78 TDD (banttan da turetilir)
+        # msg1-SubcarrierSpacing: yalnizca kisa preamble (pcfg>=28) icin onemli
+        data['msg1_scs_khz'] = [None]*9 + [30]*9
+        data['restricted_set_config'] = ['unrestricted']*18
     else:
         # LTE: PCI 0-503, band 1800 MHz, PRACH config 0-63
         data['pci'] = [0,1,2, 3,0,5, 6,7,8, 9,1,11, 12,13,14, 15,16,2]
@@ -438,6 +511,10 @@ def generate_sample_excel(technology='LTE'):
         data['prach_config_index'] = [0]*18
         data['zero_correlation_zone'] = [5,5,5, 5,5,5, 8,8,8, 11,11,11, 5,5,5, 8,8,8]
         data['cell_range'] = [None]*18  # Huawei: cellRadius (m), None=Nokia modu
+        data['earfcn'] = [1650]*9 + [1801]*9          # B3'te 20 MHz ve 10 MHz tasiyici
+        data['duplex'] = ['FDD']*18
+        data['msg1_scs_khz'] = [None]*18              # LTE'de format belirler
+        data['restricted_set_config'] = ['unrestricted']*18
 
     df = pd.DataFrame(data)
     out = io.BytesIO()
@@ -458,20 +535,36 @@ def generate_sample_excel(technology='LTE'):
 
         info = {
             'Sütun': ['cell_id','site_id','latitude','longitude','azimuth','beamwidth',
-                      'sector','pci','rsi','technology','band','tac','prach_config_index','zero_correlation_zone','cell_range'],
+                      'sector','pci','rsi','technology','band','earfcn','duplex',
+                      'msg1_scs_khz','restricted_set_config','tac',
+                      'prach_config_index','zero_correlation_zone','cell_range'],
             'Zorunlu': ['Evet','Hayır','Evet','Evet','Hayır','Hayır','Hayır',
-                       'Evet','Hayır','Hayır','Hayır','Hayır','Hayır','Hayır','Hayır'],
+                       'Evet','Hayır','Hayır','Hayır','Önerilir','Hayır','Hayır',
+                       'Hayır','Hayır','Hayır','Hayır','Hayır'],
             'Açıklama': [
                 'Benzersiz hücre ID','Site ID','Enlem (-90~90)','Boylam (-180~180)',
                 'Anten yönü (0-360°)','Yatay hüzme genişliği (°)',
                 'Sektör numarası (dolu ise naming convention yerine bu kullanılır)',
                 pci_desc, rsi_desc,
-                'LTE / NR','Frekans bandı (MHz)','Tracking Area Code',
+                'LTE / NR (arayüz seçimi geçerlidir, bu sütun bilgi amaçlıdır)',
+                'Frekans bandı (MHz)',
+                'EARFCN / ARFCN — taşıyıcı anahtarı. Çakışmalar yalnızca aynı '
+                'taşıyıcıdaki hücreler arasında sayılır. Yoksa band kullanılır, '
+                'ama band aynı bandtaki iki taşıyıcıyı AYIRAMAZ.',
+                'FDD / TDD — boşsa banttan türetilir. Sadece istisna durumlar için.',
+                'msg1-SubcarrierSpacing (kHz): 15/30/60/120. Yalnızca NR kısa '
+                'preamble (prach config ≥ 28) için gerekir; hücre menzilini belirler.',
+                'unrestricted / typeA / typeB — yüksek hız (restricted) Ncs kümesi. '
+                'A ve B zcz=11''den itibaren farklıdır.',
+                'Tracking Area Code',
                 prach_desc,
                 'zeroCorrelationZoneConfig (0-15, Ncs cyclic shift belirler → cell range)',
                 'Huawei cellRadius (metre). Varsa ZCZ yerine bu değer kullanılır'],
             'Örnek': ['SITE001_1','SITE001','41.0082','28.9784','120','65',
-                     '1', pci_ex, rsi_ex, tech_label, band_ex, '1001', prach_ex, '5', '14500']
+                     '1', pci_ex, rsi_ex, tech_label, band_ex,
+                     ('632628' if is_nr else '1650'), ('TDD' if is_nr else 'FDD'),
+                     ('30' if is_nr else ''), 'unrestricted',
+                     '1001', prach_ex, '5', '14500']
         }
         pd.DataFrame(info).to_excel(w, sheet_name='Format Bilgisi', index=False)
     return out.getvalue()

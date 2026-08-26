@@ -124,6 +124,11 @@ def main():
         if r['planned_rsi'] != '—':
             assigned_map[r['cell_id']] = int(r['planned_rsi'])
             ncs_map[r['cell_id']] = int(r['ncs'])
+    # Carrier-aware, like the engine: PRACH lives on one carrier, so two cells
+    # on different carriers may share an RSI. The sample workbook carries two
+    # carriers, so a carrier-blind check here reports false overlaps.
+    from pci_engine import build_carrier_map, same_carrier
+    _cm = build_carrier_map(df)
     overlap_count = 0
     for c, ns in results['neighbors'].items():
         c = str(c)
@@ -132,6 +137,7 @@ def main():
             nb = str(nb)
             if nb not in assigned_map: continue
             if c >= nb: continue  # check each pair once
+            if not same_carrier(_cm, c, nb): continue
             if rsi_overlap(assigned_map[c], ncs_map[c], assigned_map[nb], ncs_map[nb]):
                 overlap_count += 1
                 print(f"   ⚠️ OVERLAP: {c} RSI={assigned_map[c]} vs {nb} RSI={assigned_map[nb]}")

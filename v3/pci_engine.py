@@ -1502,24 +1502,46 @@ def derive_zcz_from_cell_range(cell_range_m, technology='LTE',
     return best_zcz, ncs_table[best_zcz]
 
 
-def _row_restricted(row) -> bool:
-    """True if the cell uses the restricted (high-speed) Ncs set.
+RESTRICTED_SET_VALUES = ('unrestricted', 'typeA', 'typeB')
 
-    Reads the 'high_speed' column (Nokia highSpeedFlag / Huawei HighSpeedFlag).
-    Accepts boolean, 0/1 and common textual truthy values.
+
+def restricted_set_config(row):
+    """'unrestricted' | 'typeA' | 'typeB' for a cell.
+
+    LTE Rel-13 and NR both define TWO restricted sets, and they diverge from
+    zcz=11 (type A: 128, 158, 202, 237; type B: 118, 137, then N/A).  A boolean
+    high-speed flag cannot express that, so the column is read as a value:
+    NR calls it restrictedSetConfig, LTE calls it highSpeedFlag, and an
+    operator carrying type B needs to be able to say so.
     """
-    hs = row.get('high_speed')
+    hs = row.get('restricted_set_config')
     if hs is None:
-        return False
+        hs = row.get('high_speed')
+    if hs is None:
+        return 'unrestricted'
     try:
         if pd.isna(hs):
-            return False
+            return 'unrestricted'
     except (TypeError, ValueError):
         pass
-    s = str(hs).strip().lower()
-    return s in ('1', '1.0', 'true', 'yes', 'evet', 'on', 'high', 'hs',
-                 'highspeed', 'high_speed', 'restricted', 'restricteda',
-                 'restricted_a', 'typea', 'a')
+    t = str(hs).strip().lower().replace('-', '').replace('_', '').replace(' ', '')
+    if t in ('', '0', '0.0', 'false', 'no', 'hayir', 'off', 'none',
+             'unrestricted', 'unrestrictedset'):
+        return 'unrestricted'
+    if t.endswith('b') or t in ('2', '2.0', 'restrictedsettypeb', 'typeb'):
+        return 'typeB'
+    return 'typeA'
+
+
+def _row_restricted(row):
+    """Backward-compatible view of restricted_set_config().
+
+    Returns False for unrestricted, otherwise the set name — which is truthy
+    and is also what get_ncs() wants, so `restricted=_row_restricted(row)`
+    keeps working and now carries the type through.
+    """
+    cfg = restricted_set_config(row)
+    return False if cfg == 'unrestricted' else cfg
 
 
 def _effective_zcz(row, technology='LTE'):
@@ -1601,17 +1623,18 @@ def _prach_params(row, technology='LTE', rsi=None):
     roots_min = roots_max = None
     feasible = True
     if restricted:
+        _set_type = 'B' if str(restricted).upper().endswith('B') else 'A'
         rn = roots_needed_for_cell(rsi if rsi is not None else 0, ncs, nzc,
-                                   restricted=True)
+                                   restricted=True, set_type=_set_type)
         if rn is None:
             roots_exact = False
-            roots_min, _typ, roots_max = restricted_roots_bounds(ncs, nzc)
+            roots_min, _typ, roots_max = restricted_roots_bounds(ncs, nzc, _set_type)
             if _typ is None:
                 feasible = False
                 rn = None
             else:
                 rn = _typ
-        ppr = preambles_per_root_restricted(1, ncs, nzc)
+        ppr = preambles_per_root_restricted(1, ncs, nzc, _set_type)
     else:
         rn = roots_needed(64, ncs, nzc)
         ppr = preambles_per_root(ncs, nzc)
@@ -1624,6 +1647,7 @@ def _prach_params(row, technology='LTE', rsi=None):
         'nzc': nzc,
         'zcz': zcz,
         'restricted': restricted,
+        'restricted_set': restricted_set_config(row),
         'duplex': duplex,
         'delta_f_ra_khz': dfra,
         'invalid_prach_config': invalid_pcfg,

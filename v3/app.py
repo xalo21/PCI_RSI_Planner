@@ -322,11 +322,20 @@ Aralıklar seçili teknolojiye (**{_tech_lbl}**) göre gösterilir.
 | `pci` | ✅ | Physical Cell ID ({_tech_lbl}: 0-{pci_max(tech)}) |
 | `azimuth` | ❌ | Anten yönü (°) |
 | `sector` | ❌ | Sektör numarası (dolu ise NC yerine bu kullanılır) |
-| `rsi` | ❌ | Root Sequence Index |
+| `rsi` | ❌ | Root Sequence Index (L=839: 0-837, L=139: 0-137) |
+| **`earfcn`** | ⭐ | **EARFCN / ARFCN — taşıyıcı anahtarı** |
+| `band` | ❌ | Frekans bandı (MHz) — `earfcn` yoksa taşıyıcı anahtarı olur |
+| `duplex` | ❌ | FDD / TDD — boşsa banttan türetilir |
+| `msg1_scs_khz` | ❌ | msg1-SubcarrierSpacing (15/30/60/120) — NR kısa preamble için |
+| `high_speed` | ❌ | unrestricted / typeA / typeB (0/1 de kabul edilir) |
 | `prach_config_index` | ❌ | PRACH Config ({_tech_lbl}: 0-{_pcfg_max}) |
 | `zero_correlation_zone` | ❌ | Ncs config (0-15) |
 | `cell_range` | ❌ | Huawei cellRadius (metre) — varsa ZCZ yerine kullanılır |
-| `high_speed` | ❌ | highSpeedFlag (0/1) — restricted Ncs tablosu kullanılır |
+
+⭐ **`earfcn` önerilir:** çakışmalar yalnızca aynı taşıyıcıdaki hücreler
+arasında sayılır. Yoksa `band` kullanılır — ama band, **aynı banttaki iki
+taşıyıcıyı ayıramaz** (ör. 1800 MHz'de 20 MHz ve 10 MHz taşıyıcı).
+Hiçbiri yoksa tüm ağ tek taşıyıcı sayılır.
 """)
 
     if st.session_state.df is not None:
