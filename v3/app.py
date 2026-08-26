@@ -2275,12 +2275,34 @@ with tab6:
                             key=f"nc_prach_{i}",
                             help=f"{tech}: 0-{prach_config_max(tech)}"
                                  + (" (0-27 long L=839, ≥28 short L=139)" if tech == 'NR' else ""))
+                        band_mhz = st.number_input("Band (MHz)", 0, 100000, 0,
+                                                   key=f"nc_band_{i}",
+                                                   help="ARFCN yoksa taşıyıcı anahtarı "
+                                                        "olarak kullanılır; duplex de bundan türetilir.")
                     with mc5:
                         cell_range_m = st.number_input("Cell Range (m) — Huawei", 0, 120000, 0,
                                                        key=f"nc_cr_{i}",
                                                        help="Huawei cellRadius (metre). Girilirse ZCZ yerine bu değer kullanılır.")
-                        earfcn = st.number_input("EARFCN/ARFCN", 0, 100000, 0,
-                                                 key=f"nc_earfcn_{i}")
+                        earfcn = st.number_input("EARFCN / ARFCN ⭐", 0, 10000000, 0,
+                                                 key=f"nc_earfcn_{i}",
+                                                 help="Taşıyıcı anahtarı. Boş bırakılırsa hücre "
+                                                      "hiçbir komşuyla aynı taşıyıcıda sayılmaz ve "
+                                                      "KıSıTSIZ planlanır.")
+                        msg1_scs = st.selectbox("msg1 SCS (kHz)", [0, 15, 30, 60, 120],
+                                                key=f"nc_scs_{i}",
+                                                help="Yalnızca NR kısa preamble (PRACH cfg ≥ 28) "
+                                                     "için; 0 = otomatik (banttan).") if tech == 'NR' else 0
+
+                    mc6, mc7 = st.columns(2)
+                    with mc6:
+                        hs_val = st.selectbox("Restricted set", ['unrestricted', 'typeA', 'typeB'],
+                                              key=f"nc_hs_{i}",
+                                              help="Yüksek hız (highSpeedFlag / restrictedSetConfig)")
+                    with mc7:
+                        dist_nm = st.text_input("dist_name (OSS)", key=f"nc_dn_{i}",
+                                                placeholder="PLMN-PLMN/MRBTS-.../NRCELL-...",
+                                                help="OSS XML çıktısı için. Boşsa bu hücre "
+                                                     "XML'e yazılmaz.")
 
                     if cid:
                         row_data = {
@@ -2291,7 +2313,15 @@ with tab6:
                             'zero_correlation_zone': zcz,
                             'prach_config_index': prach_cfg,
                             'earfcn': earfcn,
+                            'technology': tech,
+                            'high_speed': hs_val,
                         }
+                        if band_mhz > 0:
+                            row_data['band'] = band_mhz
+                        if tech == 'NR' and msg1_scs:
+                            row_data['msg1_scs_khz'] = msg1_scs
+                        if dist_nm and dist_nm.strip():
+                            row_data['dist_name'] = dist_nm.strip()
                         if cell_range_m > 0:
                             row_data['cell_range'] = cell_range_m
                         rows.append(row_data)
@@ -2325,7 +2355,10 @@ Opsiyonel: `site_id`, `beamwidth`, `zero_correlation_zone`, `prach_config_index`
                                              ('pci', None), ('rsi', None),
                                              ('zero_correlation_zone', 5),
                                              ('prach_config_index', 0),
-                                             ('earfcn', 0)]:
+                                             ('earfcn', 0), ('band', 0),
+                                             ('msg1_scs_khz', None),
+                                             ('high_speed', 'unrestricted'),
+                                             ('dist_name', None)]:
                             if col not in ndf.columns:
                                 ndf[col] = default
                         new_cells_df = ndf
@@ -2356,6 +2389,7 @@ Opsiyonel: `site_id`, `beamwidth`, `zero_correlation_zone`, `prach_config_index`
                             check_mod4=check_mod4,
                             sector_groups=st.session_state.sector_groups or {},
                             cell_to_sector=st.session_state.cell_to_sector or {},
+                            planning_scope=planning_scope,
                         )
                         st.session_state['new_cell_results'] = result
                     except Exception as e:
@@ -2375,6 +2409,27 @@ Opsiyonel: `site_id`, `beamwidth`, `zero_correlation_zone`, `prach_config_index`
                 rc1.metric("Toplam Hücre", len(nc_result))
                 rc2.metric("✅ PCI Bulunan", ok_count)
                 rc3.metric("❌ Bulunamayan", fail_count)
+
+                # Taşıyıcısı belirlenemeyen hücre hiçbir komşuyla aynı taşıyıcıda
+                # sayılmaz — yani kısıtsız planlanır ve önerilen PCI hiçbir şeye
+                # göre seçilmemiş olur. Sessiz kalmak kabul edilemez.
+                if 'same_carrier_neighbors' in nc_result.columns:
+                    _unc = nc_result[nc_result['carrier'].astype(str) == CARRIER_UNKNOWN]
+                    if len(_unc) > 0:
+                        st.error(
+                            f"❌ **{len(_unc)} hücrenin taşıyıcısı belirlenemedi** "
+                            f"(`earfcn` ve `band` boş). Bu hücreler hiçbir komşuyla "
+                            f"aynı taşıyıcıda sayılmaz — yani PCI/RSI önerisi "
+                            f"**hiçbir kısıt olmadan** üretildi ve güvenilmez. "
+                            f"EARFCN/ARFCN girin: "
+                            f"{', '.join(_unc['cell_id'].astype(str).head(5))}")
+                    _iso = nc_result[(nc_result['carrier'].astype(str) != CARRIER_UNKNOWN)
+                                     & (nc_result['same_carrier_neighbors'] == 0)]
+                    if len(_iso) > 0:
+                        st.warning(
+                            f"⚠️ {len(_iso)} hücrenin **aynı taşıyıcıda hiç komşusu yok** — "
+                            f"yarıçapı büyütmeyi veya ARFCN'i kontrol etmeyi düşünün: "
+                            f"{', '.join(_iso['cell_id'].astype(str).head(5))}")
 
                 st.dataframe(
                     nc_result,

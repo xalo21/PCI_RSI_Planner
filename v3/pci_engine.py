@@ -130,13 +130,26 @@ def cell_carrier(row):
 
 
 def build_carrier_map(df):
-    """cell_id -> carrier key.  See cell_carrier() for the resolution order."""
-    if 'carrier' in df.columns:
-        out = {str(r['cell_id']): (str(r['carrier']) if pd.notna(r['carrier'])
-                                   else CARRIER_UNKNOWN)
-               for _, r in df.iterrows()}
-        return out
-    return {str(r['cell_id']): cell_carrier(r) for _, r in df.iterrows()}
+    """cell_id -> carrier key.  See cell_carrier() for the resolution order.
+
+    A pre-computed 'carrier' column is used when present, but an EMPTY cell in
+    it falls back to resolving the row rather than becoming unknown.  That case
+    is not hypothetical: the new-cell finder concatenates rows onto a frame that
+    already carries the column, so every new cell arrives with it blank — and a
+    cell whose carrier is unknown shares a carrier with nothing, so it would be
+    planned against no constraints at all and silently get whatever PCI came
+    first.
+    """
+    has_col = 'carrier' in df.columns
+    out = {}
+    for _, r in df.iterrows():
+        cid = str(r['cell_id'])
+        val = r.get('carrier') if has_col else None
+        if val is not None and pd.notna(val) and str(val).strip():
+            out[cid] = str(val)
+        else:
+            out[cid] = cell_carrier(r)
+    return out
 
 
 def enrich_carrier_column(df):
@@ -2960,7 +2973,8 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                                         check_mod3=True, check_mod6=True,
                                         check_mod30=None,
                                         sector_groups=None, cell_to_sector=None,
-                                        check_mod4=False, carrier_map=None):
+                                        check_mod4=False, carrier_map=None,
+                                        planning_scope='sector'):
     """Find optimal PCI and RSI for new cells being added to an existing network.
 
     existing_df: DataFrame of existing network cells (with pci, rsi, lat, lon, etc.)
@@ -3026,6 +3040,9 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
     neighbors = {str(k): {str(v) for v in vs} for k, vs in nb_all.items()}
     if carrier_map is None:
         carrier_map = build_carrier_map(combined)
+    if planning_scope == 'carrier':
+        sector_groups, cell_to_sector = split_sector_groups_by_carrier(
+            sector_groups, cell_to_sector, carrier_map)
 
     # Re-run sector group detection on combined network so new cells
     # get proper co-sector / co-site handling
@@ -3161,6 +3178,9 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
             'roots_needed': cell_rn,
             'rsi_range': rsi_range,
             'neighbors_found': nb_count,
+            'carrier': carrier_map.get(cid, CARRIER_UNKNOWN),
+            'same_carrier_neighbors': sum(
+                1 for _n in nbs if same_carrier(carrier_map, cid, _n)),
             'pci_quality': pci_level if found_pci is not None else 'Bulunamadı',
             'reason': (f"PCI={found_pci} (mod3={found_pci%3}) [{pci_level}], RSI={found_rsi}"
                        if found_pci is not None

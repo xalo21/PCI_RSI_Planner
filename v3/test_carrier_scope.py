@@ -232,7 +232,24 @@ for _lat0, _label in ((37.8, 'Burdur ~37.8N'), (41.3, 'Samsun ~41.3N'),
               f"{_label}, R={_R} km: {len(_brute)} ciftin {len(_miss)}'i kaciyor")
 
 # ============================================================
-print("\n=== 9. Her plotly_chart benzersiz bir key almali ===")
+print("\n=== 9. build_carrier_map: bos carrier hucresi cozulmeli ===")
+# Yeni hucre bulucu, 'carrier' sutunu ZATEN olan bir frame'e satir ekliyor ve
+# yeni satirda o sutun bos kaliyor.  Bos hucre 'bilinmeyen' sayilirsa hucre
+# hicbir komsuyla ayni tasiyicida olmaz ve KISITSIZ planlanir — sessizce.
+from pci_engine import build_carrier_map as _bcm
+
+_ex = enrich_carrier_column(enrich_band_columns(pd.DataFrame([
+    {'cell_id': 'A', 'band': 3500, 'earfcn': 635332},
+    {'cell_id': 'B', 'band': 1800, 'earfcn': 366000}])))
+_new = pd.DataFrame([{'cell_id': 'NEW', 'earfcn': 635332}])
+_m = _bcm(pd.concat([_ex, _new], ignore_index=True))
+check(_m['NEW'] == 'AR635332',
+      f"bos carrier hucresi earfcn'den cozuldu ({_m['NEW']})")
+check(_m['NEW'] == _m['A'], "yeni hucre A ile ayni tasiyicida")
+_m2 = _bcm(pd.concat([_ex, pd.DataFrame([{'cell_id': 'NOCAR'}])], ignore_index=True))
+check(_m2['NOCAR'] == CARRIER_UNKNOWN, "hicbir kaynak yoksa bilinmiyor kalir")
+
+print("\n=== 10. Her plotly_chart benzersiz bir key almali ===")
 # Streamlit eleman ID'sini tur + parametrelerden uretir, dolayisiyla ayni
 # grafigi iki kez cizmek StreamlitDuplicateElementId atar. Plan sonrasi blok
 # 'Mevcut' histogramini kasitli olarak tekrar cizdigi icin bu kacinilmaz —
