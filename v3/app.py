@@ -623,19 +623,22 @@ with tab2:
             return fig
         _gi = 0
         with gauge_cols[_gi]:
-            st.plotly_chart(_make_gauge(score, "🔍 Mevcut Skor"), use_container_width=True)
+            st.plotly_chart(_make_gauge(score, "🔍 Mevcut Skor"),
+                            use_container_width=True, key='g_cur')
         if sug_result is not None:
             _gi += 1
             sug_score_val = sug_result[0]
             sug_delta = round(sug_score_val - score, 2)
             with gauge_cols[_gi]:
-                st.plotly_chart(_make_gauge(sug_score_val, f"💡 Öneri Sonrası ({'+' if sug_delta>=0 else ''}{sug_delta})"), use_container_width=True)
+                st.plotly_chart(_make_gauge(sug_score_val, f"💡 Öneri Sonrası ({'+' if sug_delta>=0 else ''}{sug_delta})"),
+                                use_container_width=True, key='g_sug')
         if plan_result is not None:
             _gi += 1
             plan_score_val = plan_result[0]
             delta = round(plan_score_val - score, 2)
             with gauge_cols[_gi]:
-                st.plotly_chart(_make_gauge(plan_score_val, f"🚀 Plan Sonrası ({'+' if delta>=0 else ''}{delta})"), use_container_width=True)
+                st.plotly_chart(_make_gauge(plan_score_val, f"🚀 Plan Sonrası ({'+' if delta>=0 else ''}{delta})"),
+                                use_container_width=True, key='g_plan')
 
         # Comparison table (co-sector conflicts are already excluded at detection time)
         _cs_col_cur = s.get('cosite_collision_count', 0)
@@ -784,7 +787,7 @@ with tab2:
                                                    plan_result[5], plan_result[6],
                                                    plan_result[7])))
             fb.update_layout(height=320, yaxis_range=[0, _ymax_cur * 1.12])
-            st.plotly_chart(fb, use_container_width=True)
+            st.plotly_chart(fb, use_container_width=True, key='bar_cur')
 
         # PCI dist — plan öncesi/sonrası karşılaştırılabilir olsun diye
         # eksen aralığı, kutu genişliği ve kategori sırası SABİT.
@@ -814,10 +817,10 @@ with tab2:
         ca, cb = st.columns(2)
         with ca:
             st.plotly_chart(_pci_hist(df, 'PCI Histogram — Mevcut'),
-                            use_container_width=True)
+                            use_container_width=True, key='hist_cur_top')
         with cb:
             st.plotly_chart(_mod3_pie(df, 'PCI Mod 3 (PSS) — Mevcut'),
-                            use_container_width=True)
+                            use_container_width=True, key='pie_cur_top')
         st.caption(f"ℹ️ Histogram ekseni {_tech_now} için tam PCI aralığını "
                    f"(0-{_PCI_MAX}) gösterir ve plan sonrası grafikle aynı "
                    f"kutu genişliğini ({_BIN} PCI) kullanır — ikisi doğrudan "
@@ -1001,22 +1004,22 @@ with tab2:
                                  color_discrete_map={'KRİTİK':'#FF1744','YÜKSEK':'#FF9100',
                                                      'ORTA':'#FFC400','DÜŞÜK':'#00E676'})
                     p_fb.update_layout(height=320, yaxis_range=[0, _ymax * 1.12])
-                    st.plotly_chart(p_fb, use_container_width=True)
+                    st.plotly_chart(p_fb, use_container_width=True, key='bar_plan')
 
                 with p_cr:
                     # Same helper as the current-state chart: identical category
                     # order and colours, so mod3=0 is the same colour in both.
                     st.plotly_chart(_mod3_pie(_plan_df, 'PCI Mod 3 (PSS) — Plan Sonrası'),
-                                    use_container_width=True)
+                                    use_container_width=True, key='pie_plan')
 
                 # Same axis range and bin width as the current-state histogram
                 _h_before, _h_after = st.columns(2)
                 with _h_before:
                     st.plotly_chart(_pci_hist(df, 'PCI Histogram — Mevcut'),
-                                    use_container_width=True)
+                                    use_container_width=True, key='hist_cur_cmp')
                 with _h_after:
                     st.plotly_chart(_pci_hist(_plan_df, 'PCI Histogram — Plan Sonrası'),
-                                    use_container_width=True)
+                                    use_container_width=True, key='hist_plan_cmp')
                 _used_before = int(df['pci'].dropna().nunique())
                 _used_after = int(_plan_df['pci'].dropna().nunique())
                 _max_before = int(df['pci'].dropna().max()) if df['pci'].notna().any() else 0

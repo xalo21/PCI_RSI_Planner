@@ -232,6 +232,34 @@ for _lat0, _label in ((37.8, 'Burdur ~37.8N'), (41.3, 'Samsun ~41.3N'),
               f"{_label}, R={_R} km: {len(_brute)} ciftin {len(_miss)}'i kaciyor")
 
 # ============================================================
+print("\n=== 9. Her plotly_chart benzersiz bir key almali ===")
+# Streamlit eleman ID'sini tur + parametrelerden uretir, dolayisiyla ayni
+# grafigi iki kez cizmek StreamlitDuplicateElementId atar. Plan sonrasi blok
+# 'Mevcut' histogramini kasitli olarak tekrar cizdigi icin bu kacinilmaz —
+# key vermek zorunlu.
+import ast as _ast
+import collections as _coll
+
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py'),
+            encoding='utf-8').read()
+_missing, _keys = [], []
+for _n in _ast.walk(_ast.parse(_src)):
+    if (isinstance(_n, _ast.Call) and isinstance(_n.func, _ast.Attribute)
+            and _n.func.attr == 'plotly_chart'):
+        _k = [kw for kw in _n.keywords if kw.arg == 'key']
+        if not _k:
+            _missing.append(_n.lineno)
+        else:
+            try:
+                _keys.append(_ast.literal_eval(_k[0].value))
+            except Exception:
+                _keys.append(f'<dyn@{_n.lineno}>')
+check(not _missing, f"key'siz plotly_chart yok (satırlar: {_missing})")
+_dup = [k for k, c in _coll.Counter(_keys).items() if c > 1]
+check(not _dup, f"tekrar eden plotly_chart key'i yok ({_dup})")
+print(f"       {len(_keys)} grafik, hepsi benzersiz")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")
