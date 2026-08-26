@@ -2222,7 +2222,7 @@ def _count_excl_cosector(tbl):
 
 def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=True,
                       default_beamwidth=65.0, check_mod3=True, check_mod6=True,
-                      check_mod30=True, check_rsi=True,
+                      check_mod30=None, check_rsi=True,
                       include_intra_site=True, external_neighbors=None,
                       cell_to_sector=None, progress_callback=None,
                       check_mod4=False, carrier_map=None):
@@ -2233,10 +2233,16 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
 
     # Technology-aware: NR uses mod4 (SSB DMRS), LTE uses mod6/mod30
     # Auto-enable mod4 for NR, auto-disable mod6/mod30 for NR
+    # NR'de mod30 ZORLA kapatilmaz: 30-gruplu low-PAPR dizi yapisi NR'de de
+    # vardir, ama PCI'ya bagli olmasi kosulludur (TS 38.211 §6.3.2.2.1 —
+    # hoppingId konfigure edilmisse dizi grubu PCI'dan kopar; §6.4.1.4.2 —
+    # SRS zaten hep kendi sequenceId'sini kullanir).  Bu yuzden varsayilan
+    # kapali ama cagiran acikca acabilir.
+    if check_mod30 is None:
+        check_mod30 = (technology != 'NR')
     if technology == 'NR':
         check_mod4 = True
-        check_mod6 = False
-        check_mod30 = False
+        check_mod6 = False      # NR'de CRS yok
 
     _prog(0, 'Komşuluk grafiği oluşturuluyor...')
     nb, nbr_sources, nbr_attempts = find_neighbors(df, radius_km, use_antenna_direction,
@@ -2510,7 +2516,7 @@ def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
 
 
 def suggest_pci(df, neighbors, results, technology='LTE',
-                check_mod3=True, check_mod6=True, check_mod30=True,
+                check_mod3=True, check_mod6=True, check_mod30=None,
                 sector_groups=None, cell_to_sector=None,
                 nbr_attempts=None, check_mod4=False,
                 progress_fn=None, carrier_map=None, planning_scope='sector'):
@@ -2527,10 +2533,16 @@ def suggest_pci(df, neighbors, results, technology='LTE',
     max_pci = pci_count(technology)
 
     # Technology-aware mod switching
+    # NR'de mod30 ZORLA kapatilmaz: 30-gruplu low-PAPR dizi yapisi NR'de de
+    # vardir, ama PCI'ya bagli olmasi kosulludur (TS 38.211 §6.3.2.2.1 —
+    # hoppingId konfigure edilmisse dizi grubu PCI'dan kopar; §6.4.1.4.2 —
+    # SRS zaten hep kendi sequenceId'sini kullanir).  Bu yuzden varsayilan
+    # kapali ama cagiran acikca acabilir.
+    if check_mod30 is None:
+        check_mod30 = (technology != 'NR')
     if technology == 'NR':
         check_mod4 = True
-        check_mod6 = False
-        check_mod30 = False
+        check_mod6 = False      # NR'de CRS yok
 
     pci_map = {str(k): v for k, v in zip(df['cell_id'], df['pci'])}
     str_neighbors = {str(k): {str(nb) for nb in nbs} for k, nbs in neighbors.items()}
@@ -2946,7 +2958,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                                         use_antenna_direction=True,
                                         default_beamwidth=65.0,
                                         check_mod3=True, check_mod6=True,
-                                        check_mod30=True,
+                                        check_mod30=None,
                                         sector_groups=None, cell_to_sector=None,
                                         check_mod4=False, carrier_map=None):
     """Find optimal PCI and RSI for new cells being added to an existing network.
@@ -2965,10 +2977,16 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         cell_to_sector = {}
 
     # Technology-aware mod switching
+    # NR'de mod30 ZORLA kapatilmaz: 30-gruplu low-PAPR dizi yapisi NR'de de
+    # vardir, ama PCI'ya bagli olmasi kosulludur (TS 38.211 §6.3.2.2.1 —
+    # hoppingId konfigure edilmisse dizi grubu PCI'dan kopar; §6.4.1.4.2 —
+    # SRS zaten hep kendi sequenceId'sini kullanir).  Bu yuzden varsayilan
+    # kapali ama cagiran acikca acabilir.
+    if check_mod30 is None:
+        check_mod30 = (technology != 'NR')
     if technology == 'NR':
         check_mod4 = True
-        check_mod6 = False
-        check_mod30 = False
+        check_mod6 = False      # NR'de CRS yok
 
     max_pci = pci_count(technology)
     max_rsi = rsi_count(technology)
@@ -3180,7 +3198,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
 def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                               technology='LTE',
                               check_mod3=True, check_mod6=True,
-                              check_mod30=True, check_mod4=False,
+                              check_mod30=None, check_mod4=False,
                               sector_groups=None, cell_to_sector=None,
                               rescan_pci=True, rescan_rsi=True,
                               carrier_map=None, planning_scope='sector'):
@@ -3201,10 +3219,16 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
             sector_groups, cell_to_sector, carrier_map)
 
     # Technology-aware mod switching
+    # NR'de mod30 ZORLA kapatilmaz: 30-gruplu low-PAPR dizi yapisi NR'de de
+    # vardir, ama PCI'ya bagli olmasi kosulludur (TS 38.211 §6.3.2.2.1 —
+    # hoppingId konfigure edilmisse dizi grubu PCI'dan kopar; §6.4.1.4.2 —
+    # SRS zaten hep kendi sequenceId'sini kullanir).  Bu yuzden varsayilan
+    # kapali ama cagiran acikca acabilir.
+    if check_mod30 is None:
+        check_mod30 = (technology != 'NR')
     if technology == 'NR':
         check_mod4 = True
-        check_mod6 = False
-        check_mod30 = False
+        check_mod6 = False      # NR'de CRS yok
 
     max_pci = pci_count(technology)
     max_rsi = rsi_count(technology)
@@ -3954,7 +3978,7 @@ def plan_rsi_network(df, neighbors, technology='LTE',
 
 
 def plan_pci_network(df, neighbors, technology='LTE',
-                     check_mod3=True, check_mod6=True, check_mod30=True,
+                     check_mod3=True, check_mod6=True, check_mod30=None,
                      sector_groups=None, cell_to_sector=None,
                      nbr_attempts=None, progress_callback=None,
                      check_mod4=False,
@@ -4005,10 +4029,16 @@ def plan_pci_network(df, neighbors, technology='LTE',
             sector_groups, cell_to_sector, carrier_map)
 
     # Technology-aware: NR uses mod4, LTE uses mod6/mod30
+    # NR'de mod30 ZORLA kapatilmaz: 30-gruplu low-PAPR dizi yapisi NR'de de
+    # vardir, ama PCI'ya bagli olmasi kosulludur (TS 38.211 §6.3.2.2.1 —
+    # hoppingId konfigure edilmisse dizi grubu PCI'dan kopar; §6.4.1.4.2 —
+    # SRS zaten hep kendi sequenceId'sini kullanir).  Bu yuzden varsayilan
+    # kapali ama cagiran acikca acabilir.
+    if check_mod30 is None:
+        check_mod30 = (technology != 'NR')
     if technology == 'NR':
         check_mod4 = True
-        check_mod6 = False
-        check_mod30 = False
+        check_mod6 = False      # NR'de CRS yok
 
     max_pci = pci_count(technology)
     pci_map = dict(zip(df['cell_id'].astype(str), df['pci']))

@@ -43,7 +43,7 @@ from data_handler import (
 )
 from nokia_export import (
     parse_raml, build_raml, resolve_cells, diff_against_template,
-    find_dist_name_column,
+    find_dist_name_column, profile_for,
 )
 
 # ============================================================
@@ -180,8 +180,18 @@ with st.sidebar:
     if tech == 'NR':
         check_mod4 = st.checkbox("Mod 4 (SSB DMRS)", True)
         check_mod6 = False
-        check_mod30 = False
-        st.caption("ℹ️ NR modunda Mod6/Mod30 devre dışıdır (LTE'ye özel).")
+        # NR'de 30-gruplu low-PAPR dizi yapisi VAR ama PCI'ya bagli olmasi
+        # kosullu: bu yuzden varsayilan kapali, karar operatorde.
+        check_mod30 = st.checkbox("Mod 30 (UL DM-RS) — koşullu", False,
+                                  help="NR'de dizi grubu yalnızca hoppingId "
+                                       "(PUCCH) / nPUSCH-Identity konfigüre "
+                                       "EDİLMEMİŞSE PCI'ya bağlıdır. SRS hiçbir "
+                                       "zaman PCI kullanmaz. Konfigürasyonunuzu "
+                                       "kontrol edip açın.")
+        st.caption("ℹ️ NR'de Mod6 yoktur (LTE CRS'e özel). Mod30 koşulludur — "
+                   "TS 38.211 §6.3.2.2.1: dizi grubu `hoppingId` yoksa PCI mod 30'a "
+                   "düşer, konfigüre edilmişse PCI'dan kopar. SRS (§6.4.1.4.2) "
+                   "her zaman kendi `sequenceId`'sini kullanır.")
     else:
         check_mod4 = False
         check_mod6 = st.checkbox("Mod 6 (CRS v_shift)", True,
@@ -2408,6 +2418,18 @@ Opsiyonel: `site_id`, `beamwidth`, `zero_correlation_zone`, `prach_config_index`
 with tab8:
     st.markdown("### 🛰️ Nokia OSS (RAML 2.0) Plan Çıktısı")
     st.caption("Planlanan PCI/RSI değerlerini OSS'e yüklenebilir XML olarak dışa aktarır.")
+    _prof_now = profile_for(tech)
+    if _prof_now['rsi_child_class']:
+        st.info(f"ℹ️ **{tech}** profili: PCI → `{_prof_now['mo_class']}"
+                f".{_prof_now['pci_param']}`, RSI → çocuk nesne "
+                f"`{_prof_now['rsi_child_class']}-0.{_prof_now['rsi_param']}` "
+                f"(hücre başına iki managedObject). "
+                f"`{_prof_now['bts_tag']}` = MRBTS.")
+    else:
+        st.info(f"ℹ️ **{tech}** profili: PCI ve RSI aynı nesnede — "
+                f"`{_prof_now['mo_class']}.{_prof_now['pci_param']}` / "
+                f"`{_prof_now['rsi_param']}`. "
+                f"`{_prof_now['bts_tag']}` = 1000000 + MRBTS.")
 
     _df_x = st.session_state.df
     if _df_x is None:
@@ -2454,12 +2476,14 @@ with tab8:
                 "köprü kurulmaz — yanlış eşleme, canlı ağda yanlış hücreye PCI "
                 "yazmak demektir ve dosya üretilirken değil, sahada anlaşılır.")
             st.markdown(
-                "Excel'e şunlardan **birini** ekleyin:\n\n"
-                "- **`dist_name`** — tam yol, ör. "
-                "`PLMN-PLMN/MRBTS-550016/NRBTS-1550016/NRCELL-211`\n"
-                "- veya **`mrbts`** ve **`nrcell`** sütunları (ör. `550016` ve `211`). "
-                "`nrbts` verilmezse `1000000 + mrbts` varsayılır — ağınızda böyle "
-                "değilse `nrbts` sütununu da ekleyin.")
+                "Hücre verisine **`dist_name`** sütununu ekleyin — OSS'teki tam yol:\n\n"
+                "```\n"
+                "NR  : PLMN-PLMN/MRBTS-60003/NRBTS-1060003/NRCELL-111\n"
+                "LTE : PLMN-PLMN/MRBTS-40309/LNBTS-40309/LNCEL-11\n"
+                "```\n"
+                "Parçalardan (MRBTS + hücre no) distName **kurulmaz** ve hiçbir "
+                "eşleştirme kuralı tahmin edilmez; değerin OSS'ten geldiği gibi "
+                "verilmesi gerekir.")
 
         st.markdown("#### 2️⃣ Mevcut OSS export'u (şablon)")
         st.caption("Zorunlu değil ama önerilir: `id` özniteliği buradan alınır ve "
@@ -2473,13 +2497,20 @@ with tab8:
                 st.success(f"✅ {_tpl_meta['count']:,} managedObject okundu — "
                            f"sınıf: {_tpl_meta['classes']}, "
                            f"parametre: {list(_tpl_meta['params'])}")
+                if _tpl_meta['guessed_tech'] and _tpl_meta['guessed_tech'] != tech:
+                    st.warning(
+                        f"⚠️ Şablon **{_tpl_meta['guessed_tech']}** görünüyor ama "
+                        f"kenar çubuğunda **{tech}** seçili. Çıktı {tech} "
+                        f"profiliyle üretilecek ve şablondaki nesnelerle "
+                        f"eşleşmeyebilir.")
             except Exception as e:
                 st.error(f"❌ XML okunamadı: {e}")
 
-        if _dn_col or _has_parts:
+        if _dn_col:
             st.markdown("---")
             st.markdown("#### 3️⃣ Eşleşme ve önizleme")
-            _resolved, _unresolved = resolve_cells(_x, template_objects=_tpl_objs)
+            _resolved, _unresolved = resolve_cells(
+                _x, technology=tech, template_objects=_tpl_objs)
             _c1, _c2 = st.columns(2)
             _c1.metric("Eşleşen hücre", f"{len(_resolved):,}")
             _c2.metric("Eşleşmeyen", f"{len(_unresolved):,}", delta_color="inverse")
