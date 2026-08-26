@@ -41,6 +41,10 @@ from data_handler import (
     read_excel_file, generate_sample_excel, export_results_to_excel,
     summarize_external_neighbors
 )
+from nokia_export import (
+    parse_raml, build_raml, resolve_cells, diff_against_template,
+    find_dist_name_column,
+)
 
 # ============================================================
 st.set_page_config(page_title="TürkTelekom PCI/RSI Planner", page_icon="📡",
@@ -263,9 +267,10 @@ st.markdown(
     f'</div></div>',
     unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab8, tab7 = st.tabs([
     "📤 Veri Yükleme", "📊 Analiz Sonuçları", "🗺️ Harita", "📋 Detaylı Raporlar",
-    "💡 Öneriler & Tarama", "🆕 Yeni Hücre Ekle", "ℹ️ Bilgi"
+    "💡 Öneriler & Tarama", "🆕 Yeni Hücre Ekle",
+    "🛰️ Nokia OSS XML", "ℹ️ Bilgi"
 ])
 
 # ============================================================
@@ -328,6 +333,7 @@ Aralıklar seçili teknolojiye (**{_tech_lbl}**) göre gösterilir.
 | `duplex` | ❌ | FDD / TDD — boşsa banttan türetilir |
 | `msg1_scs_khz` | ❌ | msg1-SubcarrierSpacing (15/30/60/120) — NR kısa preamble için |
 | `high_speed` | ❌ | unrestricted / typeA / typeB (0/1 de kabul edilir) |
+| `dist_name` | 🛰️ | OSS distName — Nokia XML çıktısı için (`PLMN-PLMN/MRBTS-…/NRBTS-…/NRCELL-…`) |
 | `prach_config_index` | ❌ | PRACH Config ({_tech_lbl}: 0-{_pcfg_max}) |
 | `zero_correlation_zone` | ❌ | Ncs config (0-15) |
 | `cell_range` | ❌ | Huawei cellRadius (metre) — varsa ZCZ yerine kullanılır |
@@ -2397,7 +2403,129 @@ Opsiyonel: `site_id`, `beamwidth`, `zero_correlation_zone`, `prach_config_index`
                                    use_container_width=True)
 
 # ============================================================
-# TAB 7 — INFO
+# TAB 8 - NOKIA OSS XML EXPORT
+# ============================================================
+with tab8:
+    st.markdown("### 🛰️ Nokia OSS (RAML 2.0) Plan Çıktısı")
+    st.caption("Planlanan PCI/RSI değerlerini OSS'e yüklenebilir XML olarak dışa aktarır.")
+
+    _df_x = st.session_state.df
+    if _df_x is None:
+        st.info("📌 Önce **Veri Yükleme** sekmesinden hücre verisini yükleyin.")
+    else:
+        _src = st.radio("Hangi değerler yazılsın?",
+                        ["Planlanan (PCI/RSI planı)", "Mevcut (dosyadaki değerler)"],
+                        horizontal=True)
+        _use_plan = _src.startswith("Plan")
+        _x = _df_x.copy()
+        _n_pci = _n_rsi = 0
+        if _use_plan:
+            _pp = st.session_state.pci_plan
+            _rp = st.session_state.rsi_plan
+            if _pp is not None and len(_pp) > 0:
+                _m = dict(zip(_pp['cell_id'].astype(str),
+                              pd.to_numeric(_pp['planned_pci'], errors='coerce')))
+                _x['pci'] = _x['cell_id'].astype(str).map(_m).fillna(_x['pci'])
+                _n_pci = int(pd.Series(list(_m.values())).notna().sum())
+            if _rp is not None and len(_rp) > 0 and 'rsi' in _x.columns:
+                _m = dict(zip(_rp['cell_id'].astype(str),
+                              pd.to_numeric(_rp['planned_rsi'], errors='coerce')))
+                _x['rsi'] = _x['cell_id'].astype(str).map(_m).fillna(_x['rsi'])
+                _n_rsi = int(pd.Series(list(_m.values())).notna().sum())
+            if _n_pci == 0 and _n_rsi == 0:
+                st.warning("⚠️ Henüz plan üretilmemiş — **📊 Analiz Sonuçları** "
+                           "sekmesinden PCI/RSI planlayın, yoksa dosyadaki mevcut "
+                           "değerler yazılır.")
+            else:
+                st.success(f"✅ Plandan alınacak: {_n_pci} PCI, {_n_rsi} RSI")
+
+        st.markdown("---")
+        st.markdown("#### 1️⃣ Hücre kimliği")
+        _dn_col = find_dist_name_column(_x.columns)
+        _has_parts = {'mrbts', 'nrcell'} <= {str(c).strip().lower() for c in _x.columns}
+        if _dn_col:
+            st.success(f"✅ `{_dn_col}` sütunu bulundu — distName doğrudan buradan alınacak.")
+        elif _has_parts:
+            st.success("✅ `mrbts` + `nrcell` sütunları bulundu — distName bunlardan kurulacak.")
+        else:
+            st.error(
+                "❌ **Hücre kimliği eksik.** OSS hücreleri `distName` ile tanır, "
+                "planlama verisi `cell_id` ile. Bu ikisi arasında tahmine dayalı "
+                "köprü kurulmaz — yanlış eşleme, canlı ağda yanlış hücreye PCI "
+                "yazmak demektir ve dosya üretilirken değil, sahada anlaşılır.")
+            st.markdown(
+                "Excel'e şunlardan **birini** ekleyin:\n\n"
+                "- **`dist_name`** — tam yol, ör. "
+                "`PLMN-PLMN/MRBTS-550016/NRBTS-1550016/NRCELL-211`\n"
+                "- veya **`mrbts`** ve **`nrcell`** sütunları (ör. `550016` ve `211`). "
+                "`nrbts` verilmezse `1000000 + mrbts` varsayılır — ağınızda böyle "
+                "değilse `nrbts` sütununu da ekleyin.")
+
+        st.markdown("#### 2️⃣ Mevcut OSS export'u (şablon)")
+        st.caption("Zorunlu değil ama önerilir: `id` özniteliği buradan alınır ve "
+                   "planın OSS'teki mevcut değerlerden farkı gösterilir.")
+        _tpl_file = st.file_uploader("Mevcut OSS XML dosyası", type=['xml'],
+                                     key='oss_template')
+        _tpl_objs, _tpl_meta = None, None
+        if _tpl_file is not None:
+            try:
+                _tpl_objs, _tpl_meta = parse_raml(_tpl_file.getvalue())
+                st.success(f"✅ {_tpl_meta['count']:,} managedObject okundu — "
+                           f"sınıf: {_tpl_meta['classes']}, "
+                           f"parametre: {list(_tpl_meta['params'])}")
+            except Exception as e:
+                st.error(f"❌ XML okunamadı: {e}")
+
+        if _dn_col or _has_parts:
+            st.markdown("---")
+            st.markdown("#### 3️⃣ Eşleşme ve önizleme")
+            _resolved, _unresolved = resolve_cells(_x, template_objects=_tpl_objs)
+            _c1, _c2 = st.columns(2)
+            _c1.metric("Eşleşen hücre", f"{len(_resolved):,}")
+            _c2.metric("Eşleşmeyen", f"{len(_unresolved):,}", delta_color="inverse")
+            if _unresolved:
+                st.warning(f"⚠️ {len(_unresolved)} hücre XML'e **yazılmayacak**:")
+                st.dataframe(pd.DataFrame(_unresolved).head(50),
+                             use_container_width=True, hide_index=True)
+
+            if _resolved:
+                if _tpl_objs:
+                    _d = diff_against_template(_resolved, _tpl_objs)
+                    _chg_pci = int((_d['PCI değişti'] == '✅').sum())
+                    _chg_rsi = int((_d['RSI değişti'] == '✅').sum())
+                    st.markdown(f"**OSS'te değişecek:** {_chg_pci} PCI, "
+                                f"{_chg_rsi} RSI ({len(_d)} hücre içinde)")
+                    _only = st.checkbox("Sadece değişenleri göster", True,
+                                        key='oss_only_chg')
+                    _show = _d[(_d['PCI değişti'] == '✅') |
+                               (_d['RSI değişti'] == '✅')] if _only else _d
+                    st.dataframe(_show, use_container_width=True,
+                                 hide_index=True, height=320)
+                else:
+                    st.dataframe(pd.DataFrame(_resolved), use_container_width=True,
+                                 hide_index=True, height=320)
+
+                st.markdown("---")
+                st.markdown("#### 4️⃣ İndir")
+                _o1, _o2, _o3 = st.columns(3)
+                _fname = _o1.text_input("Dosya adı", "PCI_RSI_Plan.xml", key='oss_fname')
+                _inc_rsi = _o2.checkbox("RSI'yı da yaz", True, key='oss_inc_rsi')
+                _op = _o3.selectbox("operation", ["update", "create"], key='oss_op')
+                _xml = build_raml(_resolved, file_name=_fname,
+                                  include_rsi=_inc_rsi, operation=_op)
+                st.download_button(
+                    f"⬇️ {_fname} indir ({len(_resolved):,} hücre)",
+                    data=_xml, file_name=_fname, mime="application/xml",
+                    type="primary", use_container_width=True)
+                with st.expander("📄 Üretilen XML — ilk 40 satır"):
+                    st.code("\n".join(_xml.decode('utf-8').splitlines()[:40]),
+                            language='xml')
+                if _tpl_objs is None:
+                    st.info("ℹ️ Şablon yüklenmediği için `id` özniteliği yazılmadı. "
+                            "OSS'iniz `id` bekliyorsa mevcut export'u şablon olarak yükleyin.")
+
+# ============================================================
+# TAB 7 - INFO
 # ============================================================
 with tab7:
     st.markdown("### ℹ️ TürkTelekom PCI/RSI Planner v2.0")

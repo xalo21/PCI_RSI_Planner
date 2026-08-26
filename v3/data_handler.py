@@ -503,6 +503,10 @@ def generate_sample_excel(technology='LTE'):
         # msg1-SubcarrierSpacing: yalnizca kisa preamble (pcfg>=28) icin onemli
         data['msg1_scs_khz'] = [None]*9 + [30]*9
         data['restricted_set_config'] = ['unrestricted']*18
+        # OSS kimligi — Nokia RAML disa aktarimi bunu dogrudan kullanir
+        data['dist_name'] = [
+            f'PLMN-PLMN/MRBTS-{60000+s}/NRBTS-{1060000+s}/NRCELL-{1}{c}{s%3+1}'
+            for s in range(1, 7) for c in range(1, 4)]
     else:
         # LTE: PCI 0-503, band 1800 MHz, PRACH config 0-63
         data['pci'] = [0,1,2, 3,0,5, 6,7,8, 9,1,11, 12,13,14, 15,16,2]
@@ -515,6 +519,9 @@ def generate_sample_excel(technology='LTE'):
         data['duplex'] = ['FDD']*18
         data['msg1_scs_khz'] = [None]*18              # LTE'de format belirler
         data['restricted_set_config'] = ['unrestricted']*18
+        data['dist_name'] = [
+            f'PLMN-PLMN/MRBTS-{60000+s}/NRBTS-{1060000+s}/NRCELL-{1}{c}{s%3+1}'
+            for s in range(1, 7) for c in range(1, 4)]
 
     df = pd.DataFrame(data)
     out = io.BytesIO()
@@ -536,11 +543,11 @@ def generate_sample_excel(technology='LTE'):
         info = {
             'Sütun': ['cell_id','site_id','latitude','longitude','azimuth','beamwidth',
                       'sector','pci','rsi','technology','band','earfcn','duplex',
-                      'msg1_scs_khz','restricted_set_config','tac',
+                      'msg1_scs_khz','restricted_set_config','dist_name','tac',
                       'prach_config_index','zero_correlation_zone','cell_range'],
             'Zorunlu': ['Evet','Hayır','Evet','Evet','Hayır','Hayır','Hayır',
                        'Evet','Hayır','Hayır','Hayır','Önerilir','Hayır','Hayır',
-                       'Hayır','Hayır','Hayır','Hayır','Hayır'],
+                       'Hayır','OSS için','Hayır','Hayır','Hayır','Hayır'],
             'Açıklama': [
                 'Benzersiz hücre ID','Site ID','Enlem (-90~90)','Boylam (-180~180)',
                 'Anten yönü (0-360°)','Yatay hüzme genişliği (°)',
@@ -556,6 +563,8 @@ def generate_sample_excel(technology='LTE'):
                 'preamble (prach config ≥ 28) için gerekir; hücre menzilini belirler.',
                 'unrestricted / typeA / typeB — yüksek hız (restricted) Ncs kümesi. '
                 'A ve B zcz=11''den itibaren farklıdır.',
+                'OSS distName — Nokia RAML XML çıktısı için hücre kimliği. '
+                'Örn: PLMN-PLMN/MRBTS-60003/NRBTS-1060003/NRCELL-111',
                 'Tracking Area Code',
                 prach_desc,
                 'zeroCorrelationZoneConfig (0-15, Ncs cyclic shift belirler → cell range)',
@@ -564,6 +573,7 @@ def generate_sample_excel(technology='LTE'):
                      '1', pci_ex, rsi_ex, tech_label, band_ex,
                      ('632628' if is_nr else '1650'), ('TDD' if is_nr else 'FDD'),
                      ('30' if is_nr else ''), 'unrestricted',
+                     'PLMN-PLMN/MRBTS-60003/NRBTS-1060003/NRCELL-111',
                      '1001', prach_ex, '5', '14500']
         }
         pd.DataFrame(info).to_excel(w, sheet_name='Format Bilgisi', index=False)
