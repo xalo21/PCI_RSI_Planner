@@ -110,7 +110,7 @@ for zcz, exp in enumerate(EXPECTED_NR_SHORT):
          f"zcz={zcz}: {E.get_ncs(zcz,'NR',short=True)} != {exp}")
 
 # ============================================================
-g5 = group('LTE Ncs — format 4 / L_RA=139 (T5.7.2-3)', expect_fail=True, finding='K-3')
+g5 = group('LTE Ncs — format 4 / L_RA=139 (T5.7.2-3)')
 EXPECTED_LTE_FMT4 = {0: 2, 1: 4, 2: 6, 3: 8, 4: 10, 5: 12, 6: 15}
 for zcz, exp in EXPECTED_LTE_FMT4.items():
     got = E.get_ncs(zcz, 'LTE', short=True)
@@ -119,8 +119,7 @@ spec(g5, E.get_ncs(7, 'LTE', short=True) == 0,
      f"zcz=7 format 4'te N/A olmali, {E.get_ncs(7,'LTE',short=True)} dondu")
 
 # ============================================================
-g6 = group('LTE PRACH config index -> format, FDD (T5.7.1-2)',
-           expect_fail=True, finding='K-3 / Y-5')
+g6 = group('LTE PRACH config index -> format, FDD (T5.7.1-2)')
 for ci in range(0, 16):
     spec(g6, E.get_lte_preamble_format(ci) == 0, f"cfg={ci} -> format 0 olmali")
 for ci in range(16, 32):
@@ -131,9 +130,24 @@ for ci in range(48, 64):
     got = E.get_lte_preamble_format(ci)
     spec(g6, got == 3, f"cfg={ci} -> format 3 olmali (FDD'de format 4 YOK), {got} dondu")
 
+g6b = group('LTE PRACH config index -> format, TDD (T5.7.1-4)')
+for ci in range(48, 58):
+    spec(g6b, E.get_lte_preamble_format(ci, 'TDD') == 4,
+         f"TDD cfg={ci} -> format 4 olmali (L_RA=139)")
+for ci in range(58, 64):
+    spec(g6b, E.get_lte_preamble_format(ci, 'TDD') is None,
+         f"TDD cfg={ci} -> N/A olmali")
+spec(g6b, E.get_lte_preamble_format(50, 'FDD') == 3,
+     "FDD'de ayni indeks format 3 (format 4 FDD'de YOK)")
+spec(g6b, E.cell_duplex({'band': 2300}) == 'TDD', "2300 MHz -> TDD")
+spec(g6b, E.cell_duplex({'band': 1800}) == 'FDD', "1800 MHz -> FDD")
+spec(g6b, E.cell_duplex({'band': 3500}) == 'TDD', "3500 MHz -> TDD")
+spec(g6b, E.cell_duplex({'band': 1800, 'duplex': 'TDD'}) == 'TDD',
+     "duplex sutunu banttan once gelir")
+spec(g6b, E.cell_duplex({}) == 'FDD', "bilgi yoksa FDD varsayilir")
+
 # ============================================================
-g7 = group('Cevrimsel kayma penceresi = 1 / delta_f_RA',
-           expect_fail=True, finding='K-4')
+g7 = group('Cevrimsel kayma penceresi = 1 / delta_f_RA')
 # LTE format 0-3: delta_f_RA = 1.25 kHz -> 800 us.  Format 2/3'un 1600/3200 us
 # toplam suresi TEKRARDAN gelir, pencereyi degistirmez.
 for pcfg, fmt in ((0, 0), (16, 1), (32, 2), (48, 3)):

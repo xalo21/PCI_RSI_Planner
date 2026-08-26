@@ -180,8 +180,13 @@ with st.sidebar:
         st.caption("ℹ️ NR modunda Mod6/Mod30 devre dışıdır (LTE'ye özel).")
     else:
         check_mod4 = False
-        check_mod6 = st.checkbox("Mod 6 (RS)", True)
-        check_mod30 = st.checkbox("Mod 30 (PCFICH)", True)
+        check_mod6 = st.checkbox("Mod 6 (CRS v_shift)", True,
+                                 help="LTE CRS frekans kayması v_shift = PCI mod 6 "
+                                      "(TS 36.211 §6.10.1.2)")
+        check_mod30 = st.checkbox("Mod 30 (UL DM-RS / SRS)", True,
+                                  help="Uplink DM-RS / SRS dizi grubu PCI mod 30'a "
+                                       "bağlıdır (TS 36.211 §5.5.1.3). PCFICH/PHICH "
+                                       "değil — onlar PCI mod 2·N_RB ile eşlenir.")
     check_rsi = st.checkbox("RSI (PRACH cell-range)", True)
 
     st.markdown("---")
@@ -195,6 +200,12 @@ with st.sidebar:
              "(mevcut operatör stratejisi). Taşıyıcı bazı: her taşıyıcı bağımsız planlanır, "
              "daha fazla serbestlik verir.")
     planning_scope = 'sector' if _scope_label.startswith('Sekt') else 'carrier'
+    attempt_weighting = st.checkbox(
+        "📈 Trafik ağırlıklı planlama", True,
+        help="Çakışma cezaları o komşuluğun HO attempt sayısıyla ölçeklenir. "
+             "PCI sıkıştığında kaçınılmaz çakışmalar yoğun taşıyan ilişkiler "
+             "yerine sessiz ilişkilere kaydırılır. Harici komşuluk listesinde "
+             "attempt sütunu yoksa etkisizdir.")
     st.caption("ℹ️ Çakışma kapsamı her iki modda da taşıyıcı bazıdır: farklı "
                "frekanstaki iki hücre fiziksel olarak birbirini etkilemez "
                "(ölçüm raporu PCI+ARFCN taşır).")
@@ -221,13 +232,14 @@ def _stale_results_warning():
     if not ap or st.session_state.results is None:
         return
     _now = {'tech': tech, 'radius_km': float(radius_km), 'scope': planning_scope,
+            'att_w': attempt_weighting,
             'use_antenna': use_antenna, 'default_bw': float(default_bw),
             'mod3': check_mod3, 'mod4': check_mod4, 'mod6': check_mod6,
             'mod30': check_mod30, 'rsi': check_rsi,
             'intra_site': include_intra_site,
             'has_external': st.session_state.external_neighbors is not None}
     _labels = {'tech': 'Teknoloji', 'radius_km': 'Tarama Yarıçapı',
-               'scope': 'Planlama Stratejisi',
+               'scope': 'Planlama Stratejisi', 'att_w': 'Trafik Ağırlığı',
                'use_antenna': 'Anten Yönü', 'default_bw': 'Hüzme Genişliği',
                'mod3': 'Mod3', 'mod4': 'Mod4', 'mod6': 'Mod6', 'mod30': 'Mod30',
                'rsi': 'RSI Kontrolü', 'intra_site': 'Aynı-Site Komşuluğu',
@@ -404,7 +416,7 @@ Aralıklar seçili teknolojiye (**{_tech_lbl}**) göre gösterilir.
                 # Snapshot the parameters used — tabs warn if sidebar changes later
                 st.session_state.analysis_params = {
                     'tech': tech, 'radius_km': float(radius_km),
-                    'scope': planning_scope,
+                    'scope': planning_scope, 'att_w': attempt_weighting,
                     'use_antenna': use_antenna, 'default_bw': float(default_bw),
                     'mod3': check_mod3, 'mod4': check_mod4, 'mod6': check_mod6,
                     'mod30': check_mod30, 'rsi': check_rsi,
@@ -654,6 +666,27 @@ with tab2:
                 _warn_parts.append(f"**{_cs_m4}** co-site Mod4 (aynı site, farklı sektör — SSB DMRS aynı)")
             st.warning("⚠️ " + ", ".join(_warn_parts) + ". Co-site hücrelerinde PCI/mod3/mod4 **kesinlikle** farklı olmalıdır!")
 
+        # ── Traffic exposed to conflicts ──────────────────────
+        _att_tot = s.get('attempts_total') or 0
+        if _att_tot:
+            _hard = s.get('attempts_on_hard_conflicts') or 0
+            _anyc = s.get('attempts_on_any_conflict') or 0
+            st.markdown("---")
+            st.markdown("### 📈 Çakışmaya Maruz Kalan Trafik")
+            _t1, _t2, _t3 = st.columns(3)
+            _t1.metric("Toplam HO denemesi", f"{_att_tot:,}")
+            _t2.metric("Sert çakışmalarda", f"{_hard:,}",
+                       f"%{100*_hard/_att_tot:.1f}",
+                       delta_color="inverse",
+                       help="Collision + Confusion + RSI taşıyan komşuluklardaki deneme")
+            _t3.metric("Tüm çakışmalarda", f"{_anyc:,}",
+                       f"%{100*_anyc/_att_tot:.1f}",
+                       delta_color="inverse",
+                       help="Mod-N dahil, herhangi bir çakışma taşıyan komşuluklardaki deneme")
+            st.caption("ℹ️ Skor çakışma **sayısını** ölçer; bu ise o çakışmaların "
+                       "kaç handover'ı etkilediğini gösterir. Skora dahil edilmez, "
+                       "yanında okunur.")
+
         # ── Per-carrier breakdown ─────────────────────────────
         _pcar = s.get('per_carrier') or []
         if len(_pcar) > 1:
@@ -848,7 +881,8 @@ with tab2:
                                                reserved_pci_start=sa_reserved_start,
                                                reserved_pci_end=sa_reserved_end,
                                                carrier_map=_results.get('carrier_map'),
-                                               planning_scope=planning_scope)
+                                               planning_scope=planning_scope,
+                                               attempt_weighting=attempt_weighting)
                     st.session_state.pci_plan = pci_plan
                     # Invalidate plan caches
                     st.session_state._plan_cache_key = None

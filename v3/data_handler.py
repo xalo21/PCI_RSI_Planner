@@ -136,6 +136,13 @@ COLUMN_ALIASES = {
     'high_speed': ['high_speed','highspeedflag','high_speed_flag','highspeed',
                    'restricted_set','restrictedset','restricted_set_config',
                    'prach_high_speed','speed_flag','hsflag'],
+    # FDD/TDD. Optional: derived from the band when absent, this is the override.
+    'duplex': ['duplex','duplex_mode','duplexmode','fdd_tdd','duplekx','duplex_type'],
+    # msg1-SubcarrierSpacing (TS 38.331). Only matters for NR short preambles
+    # (L_RA=139), where it sets the cyclic-shift window: 15/30/60/120 kHz.
+    'msg1_scs_khz': ['msg1_scs_khz','msg1_scs','msg1_subcarrierspacing',
+                     'msg1_subcarrier_spacing','prach_scs','prach_scs_khz',
+                     'rach_scs','scs_khz','prach_subcarrier_spacing'],
     'cell_range': ['cell_range','cellrange','cell_radius','cellradius',
                    'huawei_cell_range','huawei_cellrange','cell_range_m',
                    'cell_radius_m','max_cell_range','coverage_radius'],

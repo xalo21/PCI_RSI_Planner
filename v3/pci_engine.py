@@ -218,6 +218,93 @@ def prach_config_max(technology='LTE'):
     return 255 if norm_tech(technology) == 'NR' else 63
 
 
+ATTEMPT_W_MIN = 0.25    # a relation with no measured traffic still matters a little
+ATTEMPT_W_MAX = 4.00    # cap so one very hot pair cannot dominate the objective
+
+
+def build_attempt_weights(nbr_attempts, w_min=ATTEMPT_W_MIN, w_max=ATTEMPT_W_MAX):
+    """Map each neighbour pair to an optimisation weight from its HO attempts.
+
+    A conflict on a relation carrying 38,000 handovers a day is not the same
+    problem as a conflict on a relation nobody uses, and when PCIs run short
+    the planner has to push the unavoidable conflicts onto the quiet pairs.
+    Without weights it picks arbitrarily.
+
+    Raw counts are unusable directly - they span 0 to >150,000 here, so a
+    linear weight would let a handful of pairs drown out everything else and
+    the annealer would stop making progress on the rest.  log1p normalised
+    against the 99th percentile keeps the ordering while compressing the range
+    to w_min..w_max (16x between a dead pair and a hot one).
+
+    Returns (weight_lookup, stats).  weight_lookup(a, b) -> float.
+    """
+    if not nbr_attempts:
+        return (lambda a, b: 1.0), {'enabled': False}
+    vals = sorted(v for v in nbr_attempts.values() if v and v > 0)
+    if not vals:
+        return (lambda a, b: 1.0), {'enabled': False}
+    ref = vals[min(int(len(vals) * 0.99), len(vals) - 1)]
+    denom = _math.log1p(ref) or 1.0
+    span = w_max - w_min
+    cache = {}
+    for pair, att in nbr_attempts.items():
+        a = att if att and att > 0 else 0
+        w = w_min + span * min(_math.log1p(a) / denom, 1.0)
+        cache[(str(pair[0]), str(pair[1]))] = w
+
+    def lookup(a, b):
+        a, b = str(a), str(b)
+        key = (a, b) if a < b else (b, a)
+        return cache.get(key, w_min)
+
+    stats = {'enabled': True, 'pairs': len(cache), 'p99_attempts': ref,
+             'median_attempts': vals[len(vals) // 2],
+             'max_attempts': vals[-1], 'w_min': w_min, 'w_max': w_max}
+    return lookup, stats
+
+
+def conflicted_attempts(conflict_tables, nbr_attempts):
+    """Total HO attempts riding on relations affected by a conflict.
+
+    The health score counts conflicts; this counts the traffic exposed to them,
+    which is what actually shows up as dropped or failed handovers.  Reported
+    alongside the score, not folded into it.
+
+    Collision / mod-N / RSI rows name two cells that ARE neighbours, so the
+    affected relation is the pair itself.  A confusion row is different: cell_1
+    and cell_2 are the two ambiguous cells and are frequently not neighbours of
+    each other — the traffic at risk rides on the two relations from the common
+    neighbour, so those are the pairs that count.
+    """
+    if not nbr_attempts:
+        return None
+    total = 0
+    seen = set()
+
+    def _add(a, b):
+        nonlocal total
+        a, b = str(a), str(b)
+        key = (a, b) if a < b else (b, a)
+        if key in seen:
+            return
+        seen.add(key)
+        total += nbr_attempts.get(key, 0)
+
+    for tbl in conflict_tables:
+        if tbl is None or len(tbl) == 0:
+            continue
+        if 'common_neighbor' in tbl.columns:
+            for ca, c1, c2 in zip(tbl['common_neighbor'].astype(str),
+                                  tbl['cell_1'].astype(str),
+                                  tbl['cell_2'].astype(str)):
+                _add(ca, c1)
+                _add(ca, c2)
+        else:
+            for a, b in zip(tbl['cell_1'].astype(str), tbl['cell_2'].astype(str)):
+                _add(a, b)
+    return total
+
+
 def pci_in_range(pci, technology='LTE'):
     """True if `pci` is a valid PCI for the technology."""
     try:
@@ -259,10 +346,15 @@ LTE_NCS_UNRESTRICTED = {
     0:0, 1:13, 2:15, 3:18, 4:22, 5:26, 6:32, 7:38,
     8:46, 9:59, 10:76, 11:93, 12:119, 13:167, 14:279, 15:419}
 
-# 3GPP TS 36.211 Table 5.7.2-3 – Ncs RESTRICTED (type A)
+# 3GPP TS 36.211 Table 5.7.2-2 – Ncs RESTRICTED set (type A), formats 0-3
 LTE_NCS_RESTRICTED = {
     0:15, 1:18, 2:22, 3:26, 4:32, 5:38, 6:46, 7:59,
     8:76, 9:93, 10:119, 11:167, 12:279, 13:419, 14:839}
+
+# 3GPP TS 36.211 Table 5.7.2-3 – Ncs for PREAMBLE FORMAT 4 (TDD only, L_RA=139)
+# zeroCorrelationZoneConfig 7-15 are N/A for this format.
+LTE_NCS_FORMAT4 = {
+    0:2, 1:4, 2:6, 3:8, 4:10, 5:12, 6:15}
 
 # 3GPP TS 36.211 Table 5.7.1-1 – Preamble Format params
 LTE_PREAMBLE_FORMATS = {
@@ -302,25 +394,80 @@ NR_PREAMBLE_FORMATS = {
     'C2': {'nzc': NZC_SHORT, 'tseq_us': 133.33, 'label': 'Format C2 (Short)'},
 }
 
+# ============================================================
+# PRACH subcarrier spacing (delta_f_RA) — K-4
+# ============================================================
+# The cyclic-shift window a cell gets from Ncs is Ncs / (L_RA * delta_f_RA),
+# i.e. it is set by the duration of ONE Zadoff-Chu sequence = 1 / delta_f_RA.
+# A format that repeats the sequence (LTE format 2/3, NR format 1/2/3) has a
+# longer TOTAL T_SEQ, but the repetition buys coverage through energy, not
+# through a wider shift window.  v2 used the total, so LTE format 2 and 3 came
+# out with twice the cell range they actually have.
+#
+# LTE formats 0-3  : 1.25 kHz  -> 800 us per sequence   (TS 36.211 T5.7.1-1)
+# LTE format 4     : 7.5 kHz   -> 133.33 us
+# NR formats 0,1,2 : 1.25 kHz  -> 800 us                (TS 38.211 T6.3.3.1-1)
+# NR format 3      : 5 kHz     -> 200 us   <- a quarter of format 0
+# NR short A/B/C   : 15*2^mu kHz -> 66.67 / 33.33 / 16.67 / 8.33 us
+
+LTE_DELTA_F_RA_KHZ = {0: 1.25, 1: 1.25, 2: 1.25, 3: 1.25, 4: 7.5}
+
+# NR prach-ConfigurationIndex -> long format, FR1 (TS 38.211 T6.3.3.2-2/3).
+# Index >= 28 is a short format.  In FR2 every index is short, which is handled
+# by the caller through the subcarrier spacing / band.
+NR_LONG_FORMAT_BY_CFG = ((15, 0), (19, 1), (22, 2), (27, 3))
+
+
+def sequence_window_us(delta_f_ra_khz):
+    """Duration of one ZC sequence = 1 / delta_f_RA, in microseconds."""
+    return 1000.0 / float(delta_f_ra_khz)
+
+
+def nr_short_delta_f_khz(scs_khz=None, band_mhz=None):
+    """delta_f_RA for an NR short preamble: 15 * 2^mu kHz.
+
+    Comes from msg1-SubcarrierSpacing when the data carries it.  Otherwise it
+    is defaulted from the band, because getting this wrong scales the cell
+    range by 2-8x: n78 runs 30 kHz, sub-3 GHz NR runs 15 kHz, FR2 runs 120 kHz.
+    """
+    if scs_khz is not None:
+        try:
+            if not pd.isna(scs_khz) and float(scs_khz) > 0:
+                return float(scs_khz)
+        except (TypeError, ValueError):
+            pass
+    try:
+        b = float(band_mhz) if band_mhz is not None and not pd.isna(band_mhz) else None
+    except (TypeError, ValueError):
+        b = None
+    if b is None:
+        return 30.0          # most common NR deployment
+    if b >= 24000:
+        return 120.0         # FR2
+    if b >= 3000:
+        return 30.0          # n77 / n78
+    return 15.0              # sub-3 GHz NR
+
+
 def get_nr_preamble_info(prach_config_index=0):
-    """Determine NR preamble format (long L=839 vs short L=139) from PRACH config index.
-    NR prach_config_index 0-27 → long sequence (Format 0-3, L=839)
-    NR prach_config_index ≥ 28 → short sequence (Format A1-C2, L=139)
-    Returns (is_short: bool, nzc: int, tseq_us: float)
+    """NR preamble sequence length and subcarrier spacing from the config index.
+
+    prach-ConfigurationIndex 0-27 -> long sequence (formats 0-3, L_RA=839)
+    prach-ConfigurationIndex >= 28 -> short sequence (A1-C2, L_RA=139)
+
+    Returns (is_short, nzc, delta_f_ra_khz, format_label).  Note the third
+    value is now the SUBCARRIER SPACING, not a T_SEQ: callers derive the
+    cyclic-shift window with sequence_window_us().
     """
     pcfg = int(prach_config_index) if not pd.isna(prach_config_index) else 0
     if pcfg >= 28:
-        return True, NZC_SHORT, 133.33
-    else:
-        # Long: formats 0-3
-        if pcfg <= 8:
-            return False, NZC_LONG, 800.0
-        elif pcfg <= 18:
-            return False, NZC_LONG, 800.0
-        elif pcfg <= 24:
-            return False, NZC_LONG, 1600.0
-        else:
-            return False, NZC_LONG, 1600.0
+        return True, NZC_SHORT, None, 'Short (L=139)'
+    for hi, fmt in NR_LONG_FORMAT_BY_CFG:
+        if pcfg <= hi:
+            # Format 3 is the odd one out: 5 kHz, so a quarter of the shift
+            # window that formats 0-2 get from the same Ncs.
+            return False, NZC_LONG, (5.0 if fmt == 3 else 1.25), f'Format {fmt} (Long)'
+    return False, NZC_LONG, 1.25, 'Format 0 (Long)' 
 
 # ============================================================
 # Band / Bandwidth Detection from Cell ID Naming Convention
@@ -989,14 +1136,84 @@ def detect_sector_groups(df, azimuth_tolerance=10.0, location_tolerance_m=50.0):
 # ============================================================
 # PRACH Config Index → Preamble Format (3GPP TS 36.211 Table 5.7.1-2 FDD)
 # ============================================================
-def get_lte_preamble_format(config_index):
+# Duplex mode by band, in MHz (the form the operator's data carries).
+# 2600 is deliberately FDD: it is Band 7 in this network.  Band 38 shares the
+# frequency and is TDD, so an operator using it must override with a `duplex`
+# column.
+DUPLEX_BY_BAND_MHZ = {
+    700: 'FDD',    # B28 / n28
+    800: 'FDD',    # B20 / n20
+    900: 'FDD',    # B8  / n8
+    1800: 'FDD',   # B3  / n3
+    2100: 'FDD',   # B1  / n1
+    2300: 'TDD',   # B40 / n40
+    2600: 'FDD',   # B7  (B38 at the same frequency is TDD - override if used)
+    3500: 'TDD',   # n78
+    3700: 'TDD',   # n77
+}
+
+
+def cell_duplex(row):
+    """FDD or TDD for a cell.
+
+    An explicit `duplex` column always wins; otherwise it is derived from the
+    band.  Deriving beats asking for it: a hand-filled duplex column drifts,
+    while the band is already needed for the carrier key.
+    """
+    v = row.get('duplex')
+    if v is not None:
+        try:
+            if not pd.isna(v):
+                t = str(v).strip().upper()
+                if t.startswith('T'):
+                    return 'TDD'
+                if t.startswith('F'):
+                    return 'FDD'
+        except (TypeError, ValueError):
+            pass
+    for key in ('band', 'band_mhz'):
+        b = row.get(key)
+        if b is None:
+            continue
+        try:
+            if pd.isna(b):
+                continue
+            return DUPLEX_BY_BAND_MHZ.get(int(float(b)), 'FDD')
+        except (TypeError, ValueError):
+            continue
+    return 'FDD'
+
+
+def get_lte_preamble_format(config_index, duplex='FDD'):
+    """PRACH configuration index -> preamble format.
+
+    FDD, TS 36.211 Table 5.7.1-2 (frame structure type 1):
+        0-15 -> 0, 16-31 -> 1, 32-47 -> 2, 48-63 -> 3.
+        Format 4 does NOT exist in FDD.  v2 mapped 58-63 to format 4, which
+        silently switched those cells to L_RA=139.
+
+    TDD, TS 36.211 Table 5.7.1-4 (frame structure type 2):
+        indices 0-57 are valid and 58-63 are N/A.  Format 4 occupies the top
+        of the valid range, 48-57 — that is the only boundary that changes
+        L_RA (139 instead of 839) and therefore the only one that affects Ncs,
+        cell range and root demand.  The boundaries between formats 0-3 below
+        it are reproduced from the same table; if a future reader needs them
+        to be exact for a purpose other than L_RA, check them against the spec.
+    """
     ci = int(config_index) if not pd.isna(config_index) else 0
+    if str(duplex).strip().upper().startswith('T'):
+        if ci <= 19: return 0
+        if ci <= 29: return 1
+        if ci <= 39: return 2
+        if ci <= 47: return 3
+        if ci <= 57: return 4
+        return None                     # 58-63: N/A in TDD
+    # FDD
     if ci <= 15: return 0
     if ci <= 31: return 1
     if ci <= 47: return 2
-    if ci <= 57: return 3
-    if ci <= 63: return 4
-    return 0
+    if ci <= 63: return 3
+    return None
 
 # ============================================================
 # Geo utilities
@@ -1028,10 +1245,20 @@ def decompose_pci(pci):
 # PRACH / RSI Calculations
 # ============================================================
 def get_ncs(zcz, technology='LTE', restricted=False, short=False):
+    """Ncs for a zeroCorrelationZoneConfig.
+
+    `short` selects the L_RA=139 table.  For LTE that is preamble format 4
+    (TDD only) and has its OWN table — TS 36.211 Table 5.7.2-3 — which is not
+    the NR L=139 table and not the format 0-3 table.  v2 ignored `short` for
+    LTE entirely and read the format 0-3 values, so a format 4 cell got
+    Ncs=26 where the standard says 12.
+    """
     technology = norm_tech(technology)  # UI = tek otorite
     cfg = int(zcz)
     if technology == 'NR':
         return (NR_NCS_SHORT if short else NR_NCS_LONG).get(cfg, 0)
+    if short:
+        return LTE_NCS_FORMAT4.get(cfg, 0)      # 0 == N/A for zcz >= 7
     return (LTE_NCS_RESTRICTED if restricted else LTE_NCS_UNRESTRICTED).get(cfg, 0)
 
 def cell_range_from_ncs(ncs, nzc=NZC_LONG, tseq_us=800.0):
@@ -1214,7 +1441,8 @@ def rsi_overlap(rsi1, ncs1, rsi2, ncs2, nzc=NZC_LONG, npre=64, max_rsi=LTE_RSI_C
 # Huawei cellRange → zcz Reverse Mapping
 # ============================================================
 def derive_zcz_from_cell_range(cell_range_m, technology='LTE',
-                                preamble_format=0, restricted=False):
+                                preamble_format=0, restricted=False,
+                                duplex='FDD', scs_khz=None, band_mhz=None):
     """Given a cell range in metres (e.g. Huawei cellRadius), find the
     smallest zeroCorrelationZoneConfig whose Ncs covers that range.
 
@@ -1227,17 +1455,20 @@ def derive_zcz_from_cell_range(cell_range_m, technology='LTE',
 
     # Determine Nzc, Tseq, and the Ncs lookup table
     if technology == 'NR':
-        is_short = (int(preamble_format) >= 28) if isinstance(preamble_format, (int, float)) else False
-        nzc = NZC_SHORT if is_short else NZC_LONG
-        tseq_us = 133.33 if is_short else 800.0
+        _pcfg = int(preamble_format) if isinstance(preamble_format, (int, float)) else 0
+        is_short, nzc, _dfra, _lbl = get_nr_preamble_info(_pcfg)
+        if is_short:
+            _dfra = nr_short_delta_f_khz(scs_khz, band_mhz)
+        tseq_us = sequence_window_us(_dfra)
         ncs_table = NR_NCS_SHORT if is_short else NR_NCS_LONG
     else:
-        fmt = get_lte_preamble_format(int(preamble_format) if not pd.isna(preamble_format) else 0)
+        fmt = get_lte_preamble_format(
+            int(preamble_format) if not pd.isna(preamble_format) else 0, duplex)
         is_short = (fmt == 4)
         nzc = NZC_SHORT if is_short else NZC_LONG
-        tseq_us = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
+        tseq_us = sequence_window_us(LTE_DELTA_F_RA_KHZ.get(fmt, 1.25))
         if is_short:
-            ncs_table = NR_NCS_SHORT  # short sequence uses L=139 table
+            ncs_table = LTE_NCS_FORMAT4   # TS 36.211 T5.7.2-3, not the NR table
         elif restricted:
             ncs_table = LTE_NCS_RESTRICTED
         else:
@@ -1288,8 +1519,11 @@ def _effective_zcz(row, technology='LTE'):
     cr = row.get('cell_range')
     if cr is not None and not pd.isna(cr) and float(cr) > 0:
         pcfg = int(row.get('prach_config_index', 0) or 0)
-        zcz, _ = derive_zcz_from_cell_range(float(cr), technology, pcfg,
-                                            restricted=_row_restricted(row))
+        zcz, _ = derive_zcz_from_cell_range(
+            float(cr), technology, pcfg, restricted=_row_restricted(row),
+            duplex=cell_duplex(row), scs_khz=row.get('msg1_scs_khz'),
+            band_mhz=row.get('band') if row.get('band') is not None
+            else row.get('band_mhz'))
         return zcz
     zcz = row.get('zero_correlation_zone', 5)
     if pd.isna(zcz):
@@ -1319,14 +1553,28 @@ def _prach_params(row, technology='LTE', rsi=None):
     zcz = _effective_zcz(row, technology)
     restricted = _row_restricted(row)
 
+    duplex = None
+    invalid_pcfg = False
     if technology == 'NR':
-        is_short, nzc, tseq_us = get_nr_preamble_info(pcfg)
-        fmt = 'Short (L=139)' if is_short else 'Long (L=839)'
+        is_short, nzc, dfra, fmt = get_nr_preamble_info(pcfg)
+        if is_short:
+            # L_RA=139 window is set by msg1-SubcarrierSpacing (15*2^mu kHz).
+            dfra = nr_short_delta_f_khz(row.get('msg1_scs_khz'),
+                                        row.get('band') if row.get('band') is not None
+                                        else row.get('band_mhz'))
     else:
-        fmt = get_lte_preamble_format(pcfg)
+        duplex = cell_duplex(row)
+        fmt = get_lte_preamble_format(pcfg, duplex)
+        if fmt is None:
+            # prach-ConfigIndex is N/A for this duplex mode (TDD 58-63).
+            # Fall back to format 0 so the run continues, and flag it.
+            fmt = 0
+            invalid_pcfg = True
         is_short = (fmt == 4)          # LTE format 4 is TDD-only, L_RA = 139
         nzc = NZC_SHORT if is_short else NZC_LONG
-        tseq_us = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tseq_us']
+        dfra = LTE_DELTA_F_RA_KHZ.get(fmt, 1.25)
+    # The cyclic-shift window is ONE sequence, not the repeated total.
+    tseq_us = sequence_window_us(dfra)
 
     ncs = get_ncs(zcz, technology, restricted=restricted, short=is_short)
 
@@ -1362,6 +1610,9 @@ def _prach_params(row, technology='LTE', rsi=None):
         'nzc': nzc,
         'zcz': zcz,
         'restricted': restricted,
+        'duplex': duplex,
+        'delta_f_ra_khz': dfra,
+        'invalid_prach_config': invalid_pcfg,
         'ncs': ncs,
         'tseq_us': tseq_us,
         'max_rsi': (NZC_SHORT - 1) if is_short else (NZC_LONG - 1),
@@ -2036,8 +2287,17 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
                 c_col, c_con, c_m3, c_m6, c_m30, c_rsi, pairs_c,
                 n_cells=len(cells_c), m4_count=c_m4, technology=technology)})
 
+    # Traffic exposed to conflicts — what actually turns into failed handovers.
+    # Reported next to the score, never folded into it.
+    _att_total = sum(nbr_attempts.values()) if nbr_attempts else 0
+    _att_hard = conflicted_attempts([col, con, rsi], nbr_attempts)
+    _att_all = conflicted_attempts([col, con, m3, m4, m6, m30, rsi], nbr_attempts)
+
     s = {'technology':technology,'total_cells':tc,'total_neighbor_pairs':tn,
          'total_neighbor_pairs_all_layers': tn_all,
+         'attempts_total': _att_total,
+         'attempts_on_hard_conflicts': _att_hard,
+         'attempts_on_any_conflict': _att_all,
          'carrier_count': n_car, 'cells_without_carrier': n_unknown,
          'carrier_cells': car_counts, 'per_carrier': per_carrier,
          'max_pci_range':f'0-{mp-1}','search_radius_km':radius_km,
@@ -3654,7 +3914,8 @@ def plan_pci_network(df, neighbors, technology='LTE',
                      check_mod4=False,
                      sa_iterations_override=0,
                      reserved_pci_start=None, reserved_pci_end=None,
-                     carrier_map=None, planning_scope='sector'):
+                     carrier_map=None, planning_scope='sector',
+                     attempt_weighting=True):
     """Assign PCI values using **Constrained Simulated Annealing** optimisation.
 
     Algorithm (based on professional PCI planning tool research):
@@ -3748,13 +4009,20 @@ def plan_pci_network(df, neighbors, technology='LTE',
     for cid in independent_cells:
         sector_members_cache[cid] = _sector_members(cid)
 
-    # Per-pair attempt weight for weighted penalties
+    # Per-pair traffic weight.  _pair_weight keeps RAW attempt counts, used by
+    # the Phase 0 site colouring where an absolute comparison is wanted.
+    # _traffic_w is the compressed weight used inside the SA objective.
     _has_attempts = bool(nbr_attempts)
     def _pair_weight(a, b):
         if not _has_attempts:
             return 1
         pair = tuple(sorted([str(a), str(b)]))
         return nbr_attempts.get(pair, 1)
+
+    if attempt_weighting and _has_attempts:
+        _traffic_w, _traffic_stats = build_attempt_weights(nbr_attempts)
+    else:
+        _traffic_w, _traffic_stats = (lambda a, b: 1.0), {'enabled': False}
 
     # Pre-compute co-site membership as a fast set for O(1) lookup
     # Use ALL same-site detection methods (matching _count_cosite) so the
@@ -4177,12 +4445,18 @@ def plan_pci_network(df, neighbors, technology='LTE',
         m6 = pci_val % 6
         m30 = pci_val % 30
         # 1-hop checks: collision, co-site mod3, mod3/4/6/30
+        # Every pairwise penalty is scaled by the traffic on that relation, so
+        # when a conflict is unavoidable the annealer puts it on a quiet pair
+        # rather than on one carrying tens of thousands of handovers.
+        # Co-site mod3 is deliberately NOT scaled: two sectors on one site must
+        # have different PSS whatever their traffic.
         for nb_id in nb_excl_cosector.get(cid, set()):
             nb_pci = asgn.get(nb_id)
             if nb_pci is None:
                 continue
+            w = _traffic_w(cid, nb_id)
             if pci_val == nb_pci:
-                e += W_COLLISION
+                e += W_COLLISION * w
             else:
                 nb_m3 = nb_pci % 3
                 if (cid, nb_id) in _co_site_flat and m3 == nb_m3:
@@ -4191,13 +4465,13 @@ def plan_pci_network(df, neighbors, technology='LTE',
                     else:
                         e += W_CO_SITE_M3  # outdoor↔outdoor → hard
                 if W_MOD3 > 0 and m3 == nb_m3:
-                    e += W_MOD3
+                    e += W_MOD3 * w
                 if W_MOD4 > 0 and m4 == nb_pci % 4:
-                    e += W_MOD4
+                    e += W_MOD4 * w
                 if W_MOD6 > 0 and m6 == nb_pci % 6:
-                    e += W_MOD6
+                    e += W_MOD6 * w
                 if W_MOD30 > 0 and m30 == nb_pci % 30:
-                    e += W_MOD30
+                    e += W_MOD30 * w
         # 2-hop checks: confusion via reverse-PCI index.
         # For each neighbor B of cid, check if any cell sharing cid's PCI
         # is also a neighbor of B (=> 2-hop confusion pair).
@@ -4215,14 +4489,18 @@ def plan_pci_network(df, neighbors, technology='LTE',
                                 if not same_carrier(carrier_map, cid, c2):
                                     continue  # ambiguity lives within one carrier
                                 if not (my_sec and cell_to_sector.get(c2) == my_sec):
-                                    e += W_CONFUSION
+                                    # the ambiguity is felt on whichever of the
+                                    # two relations carries more traffic
+                                    e += W_CONFUSION * max(_traffic_w(nb_id, cid),
+                                                           _traffic_w(nb_id, c2))
                     else:
                         for c2 in nb_nbs:
                             if c2 != cid and c2 in same_pci:
                                 if not same_carrier(carrier_map, cid, c2):
                                     continue
                                 if not (my_sec and cell_to_sector.get(c2) == my_sec):
-                                    e += W_CONFUSION
+                                    e += W_CONFUSION * max(_traffic_w(nb_id, cid),
+                                                           _traffic_w(nb_id, c2))
         return e
 
     def _group_energy(leader, pci_val, asgn):
