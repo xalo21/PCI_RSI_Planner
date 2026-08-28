@@ -2115,6 +2115,123 @@ def detect_cosector_inconsistency(df, sector_groups, pci_col='pci', rsi_col='rsi
     return pd.DataFrame(rows)
 
 
+def detect_sector_shift(df, sector_groups, cell_to_sector=None, carrier_map=None,
+                        pci_col='pci'):
+    """Site-level view of co-sector PCI disagreement, classified by cause.
+
+    detect_cosector_inconsistency() reports the symptom cell by cell; this
+    groups it per site and says WHY, because the causes need different actions
+    and one of them means the planner is about to do the wrong thing:
+
+      AZIMUT UYUSMAZLIGI  the carriers at this site carry different azimuths,
+                          so sector grouping splits them into separate sectors.
+                          Either an antenna really does point elsewhere, or one
+                          layer's azimuth data is wrong.  Planning in 'sector'
+                          scope will NOT merge these - they are not the same
+                          sector as far as the tool can tell.
+      ROTASYON            every carrier uses the same set of PCIs but hands
+                          them to different sectors.  A systematic offset, not
+                          noise - almost always a mis-assignment.
+      FARKLI PCI KUMESI   the deviating carrier uses entirely different values.
+                          Can be deliberate: a layer planned on its own.
+      TEKIL SAPMA         a single cell out of step.
+
+    Returns a DataFrame, one row per site.
+    """
+    if not sector_groups:
+        return pd.DataFrame()
+    cell_to_sector = cell_to_sector or {}
+    carrier_map = carrier_map or {}
+    ids = df['cell_id'].astype(str)
+    pci = dict(zip(ids, df[pci_col])) if pci_col in df.columns else {}
+    site = (dict(zip(ids, df['site_id'].astype(str))) if 'site_id' in df.columns
+            else {c: (_extract_site_name(c) or c) for c in ids})
+    az = dict(zip(ids, df['azimuth'])) if 'azimuth' in df.columns else {}
+
+    by_site = defaultdict(list)
+    for c in ids:
+        by_site[site.get(c, c)].append(c)
+
+    rows = []
+    for st_name, cells in by_site.items():
+        secs = {cell_to_sector.get(c) for c in cells if cell_to_sector.get(c)}
+        if len(secs) < 2:
+            continue
+        # sector -> carrier -> PCI
+        bad_secs = []
+        for sec in secs:
+            members = [c for c in cells if cell_to_sector.get(c) == sec]
+            vals = {int(pci[c]) for c in members if c in pci and pd.notna(pci[c])}
+            if len(vals) > 1:
+                bad_secs.append(sec)
+        if not bad_secs:
+            continue
+
+        carriers = sorted({carrier_map.get(c, CARRIER_UNKNOWN) for c in cells})
+        # PCI set per carrier across the whole site
+        per_car = {}
+        az_per_car = {}
+        for car in carriers:
+            cc = [c for c in cells if carrier_map.get(c, CARRIER_UNKNOWN) == car]
+            per_car[car] = tuple(sorted(int(pci[c]) for c in cc
+                                        if c in pci and pd.notna(pci[c])))
+            az_per_car[car] = tuple(sorted({round(float(az[c])) for c in cc
+                                            if c in az and pd.notna(az[c])}))
+
+        az_sets = {v for v in az_per_car.values() if v}
+        distinct_pci_sets = {v for v in per_car.values() if v}
+
+        if len(az_sets) > 1:
+            pattern = 'AZİMUT UYUŞMAZLIĞI'
+            question = ('Katmanların azimutları farklı. Anten gerçekten farklı '
+                        'yöne mi bakıyor, yoksa bir katmanın azimut verisi mi '
+                        'yanlış? Saha kayıtlarından doğrulayın.')
+        elif len(distinct_pci_sets) == 1:
+            pattern = 'ROTASYON'
+            question = ('Her taşıyıcı aynı PCI kümesini farklı sektörlere '
+                        'vermiş — sistematik kayma. Doğru eşleme hangisi?')
+        else:
+            n_odd = sum(1 for sec in bad_secs)
+            pattern = 'TEKİL SAPMA' if n_odd == 1 else 'FARKLI PCI KÜMESİ'
+            question = ('Sapan katman ayrı mı planlanmış (kasıtlı), yoksa '
+                        'hatalı mı? Kasıtlıysa plan onu birleştirecektir.')
+
+        # which carrier deviates: the one whose per-sector PCI differs from the mode
+        odd_cells = []
+        for sec in bad_secs:
+            members = [c for c in cells if cell_to_sector.get(c) == sec]
+            counts = defaultdict(int)
+            for c in members:
+                if c in pci and pd.notna(pci[c]):
+                    counts[int(pci[c])] += 1
+            if not counts:
+                continue
+            majority = max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+            odd_cells += [c for c in members
+                          if c in pci and pd.notna(pci[c]) and int(pci[c]) != majority]
+
+        rows.append({
+            'site': st_name,
+            'desen': pattern,
+            'sektör': len(secs),
+            'taşıyıcı': len(carriers),
+            'tutarsız_sektör': len(bad_secs),
+            'sapan_hücre': ', '.join(sorted(odd_cells)),
+            'sapan_taşıyıcı': ', '.join(sorted(
+                {carrier_map.get(c, CARRIER_UNKNOWN) for c in odd_cells})),
+            'hücre': len(cells),
+            'kontrol': question,
+        })
+    out = pd.DataFrame(rows)
+    if len(out):
+        order = {'AZİMUT UYUŞMAZLIĞI': 0, 'ROTASYON': 1,
+                 'FARKLI PCI KÜMESİ': 2, 'TEKİL SAPMA': 3}
+        out = out.sort_values(by=['desen', 'site'],
+                              key=lambda col: col.map(order) if col.name == 'desen' else col)
+        out = out.reset_index(drop=True)
+    return out
+
+
 # ============================================================
 # RSI Conflict (Cell-Range-Aware)
 # ============================================================
@@ -2339,6 +2456,7 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
     rsi = detect_rsi_collisions(df, nb, 'rsi', technology, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_rsi else pd.DataFrame()
     _prog(88, 'Co-sektör tutarlılığı...')
     cosec = detect_cosector_inconsistency(df, sector_groups_for_check)
+    shift = detect_sector_shift(df, sector_groups_for_check, c2s, cm)
     _prog(90, 'Skor hesaplanıyor...')
     tc = len(df)
     # Neighbour pairs: the full graph, and the same-carrier subset that the
@@ -2432,6 +2550,7 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
          'neighbor_sources': dict(src_counts),
          'pairs_with_ho_attempts': len(nbr_attempts),
          'cosector_inconsistent_count': len(cosec),
+         'sector_shift_sites': len(shift),
          'cells_with_issues':len(set(
              (col['cell_1'].tolist() if len(col)>0 else [])+(col['cell_2'].tolist() if len(col)>0 else [])+
              (con['cell_1'].tolist() if len(con)>0 else [])+(con['cell_2'].tolist() if len(con)>0 else []))),
@@ -2443,6 +2562,7 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
             'mod3_conflicts':m3,'mod4_conflicts':m4,
             'mod6_conflicts':m6,'mod30_conflicts':m30,
             'rsi_collisions':rsi,'cosector_inconsistent':cosec,
+            'sector_shift':shift,
             'carrier_map':cm,'summary':s}
 
 def build_neighbor_table(df, neighbors, nbr_sources=None, nbr_attempts=None):

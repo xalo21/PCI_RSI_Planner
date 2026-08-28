@@ -261,7 +261,48 @@ _ok = _dci(pd.DataFrame({'cell_id': ['A', 'B'], 'pci': [5, 5], 'rsi': [1, 1],
                          'carrier': ['AR1', 'AR2']}), {'S': ['A', 'B']})
 check(len(_ok) == 0, "tutarli sektor rapor edilmiyor")
 
-print("\n=== 10. build_carrier_map: bos carrier hucresi cozulmeli ===")
+print("\n=== 10. Sektor kaymasi siniflandirmasi ===")
+# Arac SUPHELENDIKLERINI listeler, dogrulama kullanicida — o yuzden desenin
+# dogru siniflandirilmasi onemli: her desen farkli bir soru sordurur.
+from pci_engine import detect_sector_shift as _dss
+
+_rot = pd.DataFrame({
+    'cell_id': ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'],
+    'site_id': ['S'] * 6,
+    'azimuth': [0, 0, 120, 120, 240, 240],
+    'pci':     [10, 20, 20, 30, 30, 10],     # ayni kume, farkli sektorlere
+    'carrier': ['AR1', 'AR2'] * 3,
+})
+_c2s_r = {'A1': 's0', 'A2': 's0', 'B1': 's1', 'B2': 's1', 'C1': 's2', 'C2': 's2'}
+_sg_r = {'s0': ['A1', 'A2'], 's1': ['B1', 'B2'], 's2': ['C1', 'C2']}
+
+
+def _cmap(d):
+    return dict(zip(d['cell_id'].astype(str), d['carrier']))
+
+
+_t = _dss(_rot, _sg_r, _c2s_r, _cmap(_rot))
+check(len(_t) == 1 and _t.iloc[0]['desen'] == 'ROTASYON',
+      f"ayni PCI kumesi farkli sektorde -> ROTASYON "
+      f"({_t.iloc[0]['desen'] if len(_t) else 'bulunamadi'})")
+
+_azm = _rot.copy()
+_azm['azimuth'] = [0, 10, 120, 130, 240, 250]     # katmanlarin azimutu farkli
+_t2 = _dss(_azm, _sg_r, _c2s_r, _cmap(_azm))
+check(len(_t2) == 1 and _t2.iloc[0]['desen'] == 'AZİMUT UYUŞMAZLIĞI',
+      f"farkli azimut -> AZIMUT UYUSMAZLIGI "
+      f"({_t2.iloc[0]['desen'] if len(_t2) else 'bulunamadi'})")
+
+_ok = _rot.copy()
+_ok['pci'] = [10, 10, 20, 20, 30, 30]
+check(len(_dss(_ok, _sg_r, _c2s_r, _cmap(_ok))) == 0,
+      "tutarli site rapor edilmiyor")
+
+for _tt in (_t, _t2):
+    check(bool(str(_tt.iloc[0]['kontrol']).strip()),
+          "her satirda kullaniciya sorulacak somut bir kontrol var")
+
+print("\n=== 11. build_carrier_map: bos carrier hucresi cozulmeli ===")
 # Yeni hucre bulucu, 'carrier' sutunu ZATEN olan bir frame'e satir ekliyor ve
 # yeni satirda o sutun bos kaliyor.  Bos hucre 'bilinmeyen' sayilirsa hucre
 # hicbir komsuyla ayni tasiyicida olmaz ve KISITSIZ planlanir — sessizce.
@@ -278,7 +319,7 @@ check(_m['NEW'] == _m['A'], "yeni hucre A ile ayni tasiyicida")
 _m2 = _bcm(pd.concat([_ex, pd.DataFrame([{'cell_id': 'NOCAR'}])], ignore_index=True))
 check(_m2['NOCAR'] == CARRIER_UNKNOWN, "hicbir kaynak yoksa bilinmiyor kalir")
 
-print("\n=== 11. Her plotly_chart benzersiz bir key almali ===")
+print("\n=== 12. Her plotly_chart benzersiz bir key almali ===")
 # Streamlit eleman ID'sini tur + parametrelerden uretir, dolayisiyla ayni
 # grafigi iki kez cizmek StreamlitDuplicateElementId atar. Plan sonrasi blok
 # 'Mevcut' histogramini kasitli olarak tekrar cizdigi icin bu kacinilmaz —

@@ -695,6 +695,23 @@ with tab2:
                 _warn_parts.append(f"**{_cs_m4}** co-site Mod4 (aynı site, farklı sektör — SSB DMRS aynı)")
             st.warning("⚠️ " + ", ".join(_warn_parts) + ". Co-site hücrelerinde PCI/mod3/mod4 **kesinlikle** farklı olmalıdır!")
 
+        # ── Sites suspected of a sector shift ─────────────────
+        _shift = results.get('sector_shift')
+        if _shift is not None and len(_shift) > 0:
+            st.markdown("---")
+            st.markdown("### 🧭 Sektör Kayması Şüphesi — Manuel Kontrol")
+            st.warning(
+                f"⚠️ **{len(_shift)} sahada** aynı sektörün taşıyıcıları farklı PCI "
+                f"taşıyor. Araç bunları **şüpheli** olarak listeler; doğru olanın "
+                f"hangisi olduğunu saha kayıtlarından siz doğrulamalısınız.")
+            st.dataframe(
+                _shift[['site', 'desen', 'sektör', 'taşıyıcı', 'tutarsız_sektör',
+                        'sapan_hücre', 'sapan_taşıyıcı']],
+                use_container_width=True, hide_index=True)
+            for _pat, _grp in _shift.groupby('desen', sort=False):
+                st.markdown(f"**{_pat}** — {', '.join(_grp['site'])}")
+                st.caption(_grp.iloc[0]['kontrol'])
+
         # ── Co-sector consistency ─────────────────────────────
         _cosec = results.get('cosector_inconsistent')
         if _cosec is not None and len(_cosec) > 0:
@@ -1002,6 +1019,61 @@ with tab2:
                 st.dataframe(level_df, use_container_width=True, hide_index=True)
 
             st.dataframe(pci_plan, use_container_width=True, height=450)
+
+            # ── Plan bu sahalara ne yapti? ────────────────────
+            _shift_p = results.get('sector_shift')
+            if _shift_p is not None and len(_shift_p) > 0:
+                st.markdown("---")
+                st.markdown("#### 🧭 Manuel Kontrol Gereken Sahalar")
+                st.warning(
+                    f"⚠️ Analizde **{len(_shift_p)} sahada** sektör kayması şüphesi "
+                    f"vardı. Plan bu sahalardaki PCI'ları aşağıdaki gibi değiştirdi — "
+                    f"**devreye almadan önce saha kayıtlarıyla doğrulayın.**")
+                _pl = dict(zip(pci_plan['cell_id'].astype(str),
+                               pd.to_numeric(pci_plan['planned_pci'], errors='coerce')))
+                _cur = dict(zip(_df_x0['cell_id'].astype(str), _df_x0['pci'])) \
+                    if (_df_x0 := st.session_state.df) is not None else {}
+                _c2s_p = st.session_state.cell_to_sector or {}
+                _cm_p = results.get('carrier_map') or {}
+                _site_p = (dict(zip(_df_x0['cell_id'].astype(str),
+                                    _df_x0['site_id'].astype(str)))
+                           if 'site_id' in _df_x0.columns else {})
+                _rows_p = []
+                _suspect = set(_shift_p['site'])
+                for _cid, _sv in _site_p.items():
+                    if _sv not in _suspect:
+                        continue
+                    _b = _cur.get(_cid)
+                    _a = _pl.get(_cid)
+                    _rows_p.append({
+                        'site': _sv, 'cell_id': _cid,
+                        'sektör': _c2s_p.get(_cid, '—'),
+                        'taşıyıcı': _cm_p.get(_cid, '—'),
+                        'PCI (mevcut)': None if pd.isna(_b) else int(_b),
+                        'PCI (plan)': None if _a is None or pd.isna(_a) else int(_a),
+                        'değişti': '✅' if (_a is not None and not pd.isna(_a)
+                                            and not pd.isna(_b)
+                                            and int(_a) != int(_b)) else '',
+                    })
+                _dfp = pd.DataFrame(_rows_p)
+                if len(_dfp):
+                    _dfp = _dfp.sort_values(['site', 'sektör', 'taşıyıcı'])
+                    st.dataframe(_dfp, use_container_width=True, hide_index=True,
+                                 height=340)
+                    _chg = int((_dfp['değişti'] == '✅').sum())
+                    st.caption(
+                        f"ℹ️ Bu {len(_suspect)} sahada {len(_dfp)} hücre var, "
+                        f"**{_chg} tanesinin PCI'ı değişti**. Sektör bazlı modda "
+                        f"planlayıcı aynı sektör grubundaki hücreleri tek PCI'da "
+                        f"birleştirir — bu, kayma gerçekten hataysa doğru "
+                        f"davranıştır. Azimut uyuşmazlığı olan sahalarda ise "
+                        f"katmanlar **ayrı sektör** sayıldığı için birleştirilmez; "
+                        f"orada önce azimut verisini düzeltmek gerekir.")
+                    st.download_button(
+                        "⬇️ Manuel kontrol listesini indir (CSV)",
+                        data=_dfp.to_csv(index=False).encode('utf-8-sig'),
+                        file_name="manuel_kontrol_sektor_kaymasi.csv",
+                        mime="text/csv", key='dl_shift')
 
             # ── Post-plan analysis charts ──────────────────────────
             if plan_result is not None:

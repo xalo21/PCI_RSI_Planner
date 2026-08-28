@@ -609,7 +609,9 @@ def export_results_to_excel(df, results, neighbor_table, prach_info_df=None,
             rsi_suggestions.to_excel(w, sheet_name='RSI Önerileri', index=False)
         if len(neighbor_table) > 0:
             _safe_write(neighbor_table, w, 'Komşuluk Tablosu')
-        for key, name in [('collisions','PCI Collision'),('confusions','PCI Confusion'),
+        for key, name in [('sector_shift','Manuel Kontrol - Sektor Kaymasi'),
+                          ('cosector_inconsistent','Co-sektor Tutarsizligi'),
+                          ('collisions','PCI Collision'),('confusions','PCI Confusion'),
                           ('mod3_conflicts','Mod3 Conflict'),('mod4_conflicts','Mod4 Conflict'),
                           ('mod6_conflicts','Mod6 Conflict'),
                           ('mod30_conflicts','Mod30 Conflict'),('rsi_collisions','RSI Collision')]:
