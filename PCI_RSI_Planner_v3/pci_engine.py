@@ -2181,7 +2181,38 @@ def detect_sector_shift(df, sector_groups, cell_to_sector=None, carrier_map=None
         az_sets = {v for v in az_per_car.values() if v}
         distinct_pci_sets = {v for v in per_car.values() if v}
 
-        if len(az_sets) > 1:
+        # Is the PCI plan consistent when cells are grouped by the NAMING
+        # convention instead of by azimuth?  If it is, the operator's own plan
+        # follows the naming, and it is the azimuth column that disagrees —
+        # near-conclusive evidence that the azimuth data is what is wrong,
+        # not the PCI.  Worth separating, because sector grouping is built on
+        # azimuth: a bad azimuth silently corrupts the sector model for the
+        # whole site, not just this report.
+        by_name = defaultdict(list)
+        name_ok = None
+        for c in cells:
+            sn = _extract_sector_number(c)
+            if sn is not None:
+                by_name[sn].append(c)
+        if by_name:
+            name_ok = all(
+                len({int(pci[m]) for m in mem if m in pci and pd.notna(pci[m])}) <= 1
+                for mem in by_name.values())
+            name_az_conflict = any(
+                len({round(float(az[m])) for m in mem
+                     if m in az and pd.notna(az[m])}) > 1
+                for mem in by_name.values())
+        else:
+            name_az_conflict = False
+
+        if name_ok and name_az_conflict:
+            pattern = 'AZİMUT VERİSİ ŞÜPHELİ'
+            question = ('PCI planı isimlendirmeye göre TUTARLI, azimuta göre '
+                        'değil — yani plan doğru, azimut sütunu şüpheli. '
+                        'Sektör grupları azimuttan kurulduğu için bu sahanın '
+                        'TÜM analizi ve planı yanlış gruplama üzerine oturuyor. '
+                        'Azimutu düzeltip yeniden koşun.')
+        elif len(az_sets) > 1 or name_az_conflict:
             pattern = 'AZİMUT UYUŞMAZLIĞI'
             question = ('Katmanların azimutları farklı. Anten gerçekten farklı '
                         'yöne mi bakıyor, yoksa bir katmanın azimut verisi mi '
@@ -2220,12 +2251,14 @@ def detect_sector_shift(df, sector_groups, cell_to_sector=None, carrier_map=None
             'sapan_taşıyıcı': ', '.join(sorted(
                 {carrier_map.get(c, CARRIER_UNKNOWN) for c in odd_cells})),
             'hücre': len(cells),
+            'isimlendirmeye_göre_PCI': ('tutarlı' if name_ok else
+                                        'tutarsız' if name_ok is not None else '—'),
             'kontrol': question,
         })
     out = pd.DataFrame(rows)
     if len(out):
-        order = {'AZİMUT UYUŞMAZLIĞI': 0, 'ROTASYON': 1,
-                 'FARKLI PCI KÜMESİ': 2, 'TEKİL SAPMA': 3}
+        order = {'AZİMUT VERİSİ ŞÜPHELİ': 0, 'AZİMUT UYUŞMAZLIĞI': 1,
+                 'ROTASYON': 2, 'FARKLI PCI KÜMESİ': 3, 'TEKİL SAPMA': 4}
         out = out.sort_values(by=['desen', 'site'],
                               key=lambda col: col.map(order) if col.name == 'desen' else col)
         out = out.reset_index(drop=True)

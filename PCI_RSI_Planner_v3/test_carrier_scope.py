@@ -298,6 +298,32 @@ _ok['pci'] = [10, 10, 20, 20, 30, 30]
 check(len(_dss(_ok, _sg_r, _c2s_r, _cmap(_ok))) == 0,
       "tutarli site rapor edilmiyor")
 
+# AZIMUT VERISI SUPHELI: PCI isimlendirmeye gore TUTARLI ama ayni isim
+# grubunun azimutlari ayrisiyor -> plan dogru, azimut sutunu supheli.
+# Gercek veride SM6022 ve SM6299 boyle cikti ve kullanici dogruladi.
+_susp = pd.DataFrame({
+    'cell_id': ['XSITEA', 'YSITEA', 'XSITED', 'YSITED', 'XSITEG', 'YSITEG'],
+    'site_id': ['SITE'] * 6,
+    #                A/A         D/D         G/G   -> isim ayni sektor der
+    'azimuth': [110, 10, 180, 110, 250, 180],   # ama azimutlar ayrisiyor
+    'pci':     [451, 451, 140, 140, 462, 462],  # PCI isme gore TUTARLI
+    'carrier': ['AR1', 'AR2'] * 3,
+})
+_c2s_s = {'XSITEA': 'a110', 'YSITEA': 'a10', 'XSITED': 'a180', 'YSITED': 'a110',
+          'XSITEG': 'a250', 'YSITEG': 'a180'}
+_sg_s = {'a110': ['XSITEA', 'YSITED'], 'a10': ['YSITEA'],
+         'a180': ['XSITED', 'YSITEG'], 'a250': ['XSITEG']}
+_t4 = _dss(_susp, _sg_s, _c2s_s, _cmap(_susp))
+check(len(_t4) == 1 and _t4.iloc[0]['desen'] == 'AZİMUT VERİSİ ŞÜPHELİ',
+      f"isme gore tutarli + azimut ayrisik -> AZIMUT VERISI SUPHELI "
+      f"({_t4.iloc[0]['desen'] if len(_t4) else 'bulunamadi'})")
+if len(_t4):
+    check(_t4.iloc[0]['isimlendirmeye_göre_PCI'] == 'tutarlı',
+          "kanit sutunu 'tutarli' diyor")
+# ROTASYON'da isme gore de tutarsiz olmali — iki sinif karismasin
+check(len(_t) and _t.iloc[0]['isimlendirmeye_göre_PCI'] != 'tutarlı',
+      "ROTASYON ile AZIMUT VERISI SUPHELI ayirt ediliyor")
+
 for _tt in (_t, _t2):
     check(bool(str(_tt.iloc[0]['kontrol']).strip()),
           "her satirda kullaniciya sorulacak somut bir kontrol var")
