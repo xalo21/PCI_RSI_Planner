@@ -14,6 +14,12 @@ import numpy as np
 import io, tempfile, os
 from collections import defaultdict
 
+# Kapali ag (air-gapped) kurulumu.  Folium haritasi Leaflet'i, eklentilerini
+# ve altlik karolarini CDN'den ceker; internet yoksa iframe bos beyaz bir
+# kutu olarak gelir -- calismadigi belli bile olmaz.  run_v3_offline.bat
+# PCI_OFFLINE=1 ile baslatir, harita sekmesi de bunu soyler.
+OFFLINE_MODE = os.environ.get('PCI_OFFLINE', '').strip().lower() in ('1', 'true', 'yes', 'evet')
+
 from pci_engine import (
     run_full_analysis, build_neighbor_table, find_neighbors,
     haversine_distance, decompose_pci, compute_cell_prach_info,
@@ -1164,7 +1170,19 @@ with tab2:
 # TAB 3 — MAP  (Lazy-loaded for performance)
 # ============================================================
 with tab3:
-    if st.session_state.df is None:
+    if OFFLINE_MODE:
+        st.markdown("### 🗺️ PCI/RSI Haritası")
+        st.warning(
+            "🔌 **Bu kurulumda harita kullanılamıyor.**\n\n"
+            "Harita, çizim kütüphanesini (Leaflet) ve altlık sokak haritasını "
+            "internetten çeker. Kapalı ağda bunlara ulaşılamadığı için harita "
+            "boş bir kutu olarak gelir — bu yüzden sekme kapatıldı.")
+        st.info(
+            "**Diğer tüm sekmeler tam çalışıyor:** analiz, çakışma tespiti, "
+            "PCI/RSI planlama, detaylı raporlar, Excel ve Nokia OSS XML çıktısı. "
+            "Haritaya ihtiyaç duyarsanız veriyi internete açık bir makinede "
+            "aynı uygulamayla açıp haritayı oradan üretebilirsiniz.")
+    elif st.session_state.df is None:
         st.info("📌 Önce veri yükleyin.")
     else:
         import folium

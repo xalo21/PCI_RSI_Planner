@@ -1,0 +1,30 @@
+# ============================================================
+#  PCI/RSI Planner v3 — kapali ag (air-gapped) yapilandirmasi
+#  Bu dosya uygulamanin calistigi klasorde olmali.
+# ============================================================
+
+[browser]
+# Kapali agda telemetri sunucusuna ulasilamaz. Streamlit her acilista
+# denemesin diye kapatiyoruz — aksi halde acilis yavaslar ve konsol
+# baglanti hatasi kusar.
+gatherUsageStats = false
+
+[server]
+# Sunucu kendi tarayicisini acmaya calismasin (sunucu makinede tarayici
+# olmayabilir) ve e-posta sorusunu atlasin.
+headless = true
+port = 8502
+
+# 0.0.0.0 = kurumdaki diger makineler de erisebilsin.
+# Sadece bu makineden erisim istenirse: "127.0.0.1"
+address = "0.0.0.0"
+
+# Kurum ici cok kullanicili erisimde acik kalmali.
+enableXsrfProtection = true
+enableCORS = true
+
+# Buyuk sebeke dosyalari icin (varsayilan 200 MB)
+maxUploadSize = 500
+
+[theme]
+base = "light"

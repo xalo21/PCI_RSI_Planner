@@ -2,7 +2,7 @@
 chcp 65001 >nul
 echo ============================================================
 echo  TürkTelekom PCI/RSI Planner - Otomatik Kurulum (Offline)
-echo  Python 3.14 — Windows x64
+echo  Python 3.12 veya 3.14 — Windows x64
 echo ============================================================
 echo.
 
@@ -16,7 +16,15 @@ if %ERRORLEVEL% EQU 0 (
     set PYTHON_EXE=python
     goto :check_version
 )
-REM Standart kurulum konumlari
+REM Standart kurulum konumlari (wheels klasorunde 3.12 ve 3.14 icin paket var)
+if exist "C:\Python312\python.exe" (
+    set PYTHON_EXE=C:\Python312\python.exe
+    goto :check_version
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+    set PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python312\python.exe
+    goto :check_version
+)
 if exist "C:\Python314\python.exe" (
     set PYTHON_EXE=C:\Python314\python.exe
     goto :check_version
@@ -26,9 +34,11 @@ if exist "%LOCALAPPDATA%\Programs\Python\Python314\python.exe" (
     goto :check_version
 )
 echo [HATA] Python bulunamadi!
-echo   Lutfen Python 3.14 yukleyin veya PATH'e ekleyin.
+echo   Lutfen Python 3.12 (onerilen) veya 3.14 x64 yukleyin, ya da PATH'e ekleyin.
 echo   Beklenen konumlar:
 echo     - PATH'te python komutu
+echo     - C:\Python312\python.exe
+echo     - %LOCALAPPDATA%\Programs\Python\Python312\python.exe
 echo     - C:\Python314\python.exe
 echo     - %LOCALAPPDATA%\Programs\Python\Python314\python.exe
 pause
@@ -39,13 +49,21 @@ echo Python bulundu: %PYTHON_EXE%
 %PYTHON_EXE% --version
 echo.
 
-REM Versiyon kontrolu (3.14.x olmali)
+REM Versiyon kontrolu. wheels klasorunde derlenmis paketler (numpy, pandas,
+REM pyarrow, pillow...) Python surumune KILITLIDIR: cp312 ve cp314 var.
+REM Baska bir surumde offline kurulum kacinilmaz olarak basarisiz olur --
+REM internet olmadigi icin pip alternatif indiremez.
 for /f "tokens=2 delims= " %%V in ('%PYTHON_EXE% --version 2^>^&1') do set PYVER=%%V
 echo Tespit edilen versiyon: %PYVER%
-echo %PYVER% | findstr /B "3.14" >nul
+echo %PYVER% | findstr /B "3.12 3.14" >nul
 if %ERRORLEVEL% NEQ 0 (
-    echo [UYARI] Python %PYVER% tespit edildi, bu paket Python 3.14 icin hazirlanmistir.
-    echo   Devam etmek istiyor musunuz?
+    echo.
+    echo [UYARI] Python %PYVER% tespit edildi.
+    echo   Bu paketteki hazir kutuphaneler yalnizca 3.12 ve 3.14 icindir.
+    echo   Bu surumle offline kurulum BUYUK OLASILIKLA BASARISIZ olacak.
+    echo   Onerilen: Python 3.12 x64 kurun.
+    echo.
+    echo   Yine de denemek istiyor musunuz?
     choice /C EH /M "E=Evet, H=Hayir"
     if %ERRORLEVEL% EQU 2 exit /b 1
 )
@@ -81,7 +99,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo [HATA] Bazi kutuphaneler yuklenemedi!
     echo   Olasiliklar:
     echo     1. wheels klasorunde eksik paket olabilir
-    echo     2. Python versiyonu uyumsuz olabilir (3.14.x gerekli)
+    echo     2. Python versiyonu uyumsuz olabilir (3.12.x veya 3.14.x gerekli)
     echo   Detayli hata icin yukardaki ciktiyi inceleyin.
     pause
     exit /b 1
