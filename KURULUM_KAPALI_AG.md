@@ -17,13 +17,44 @@
 
 Python kurulumunda **"Add Python to PATH"** kutusunu işaretleyin.
 
-## 2. Klasörü kopyalayın
+## 2. Neyi kopyalayacaksınız
 
-Tüm klasörü olduğu gibi kopyalayın. **`wheels/` klasörü mutlaka gelmeli** —
-offline kurulumun tek kaynağı odur (~161 MB, 79 paket).
+Sadece v3 kuracaksanız v2, `.git` ve `.claude` klasörlerine gerek yok.
+**Kopyalanacaklar (toplam ~162 MB):**
 
-> ⚠️ GitHub'dan `git clone` yapmayın: `.gitignore` `wheels/` klasörünü hariç
-> tutar, klonda paketler gelmez ve kurulum yapılamaz. **USB / dosya kopyası ile taşıyın.**
+```
+hedef_klasor\
+├── setup.bat              ← kurulumu yapar
+├── requirements.txt       ← paket listesi
+├── wheels\                ← 161 MB, offline kurulumun TEK kaynağı
+├── KURULUM_KAPALI_AG.md   ← bu dosya
+└── PCI_RSI_Planner_v3\    ← uygulamanın tamamı
+    └── .streamlit\        ← GİZLİ KLASÖR, atlanmamalı
+```
+
+**Kopyalanmayacaklar:** `PCI_RSI_Planner_v2\` (ayrı uygulama), `.git\`
+(sürüm geçmişi), `.claude\`, `__pycache__\`.
+
+> ⚠️ **`.streamlit` gizli bir klasördür.** Windows Gezgini'nde "Gizli öğeler"
+> kapalıyken dosyaları tek tek seçerseniz atlanır. Atlanırsa telemetri açık
+> kalır (açılış yavaşlar) ve sunucu yalnızca localhost'u dinler — **ağdaki
+> diğer makineler erişemez.** En güvenlisi: dosyaları tek tek değil,
+> `PCI_RSI_Planner_v3` klasörünün **kendisini** kopyalayın.
+
+> ⚠️ **`PCI_RSI_Planner_v3` klasörünü tek başına kopyalamayın.** Başlatma
+> dosyaları sanal ortamı bir üst klasörde (`..\.venv`) arar; `setup.bat`,
+> `requirements.txt` ve `wheels\` de o üst klasörde olmalıdır.
+
+> ⚠️ **GitHub'dan `git clone` yapmayın:** `.gitignore` `wheels/` klasörünü
+> hariç tutar, klonda paketler gelmez ve internetsiz kurulum yapılamaz.
+> **USB / dosya kopyası ile taşıyın.**
+
+### Doğrulandı
+
+Yukarıdaki liste — v2, `.git` ve `.claude` olmadan — ayrı bir klasöre
+kopyalanıp baştan sona test edildi: offline kurulum 51 paketi sorunsuz
+kurdu, 5 test setinin tamamı geçti, uygulama 8 sekmeyle hatasız açıldı,
+`config.toml` okundu (`gatherUsageStats=False`, `address=0.0.0.0`, `port=8502`).
 
 ## 3. Kurulum
 
