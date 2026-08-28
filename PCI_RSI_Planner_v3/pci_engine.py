@@ -2003,9 +2003,11 @@ def detect_confusions(df, neighbors, pci_col='pci', cell_to_sector=None, nbr_att
                             # confusion impact = handover attempt to ambiguous cell
                             p1 = tuple(sorted([ca, cs[i]]))
                             p2 = tuple(sorted([ca, cs[j]]))
-                            att1 = nbr_attempts.get(p1, 0)
-                            att2 = nbr_attempts.get(p2, 0)
-                            att = max(att1, att2) if (att1 or att2) else ''
+                            # 0 deneme ile KAYIT YOK farkli seylerdir; ikisini
+                            # de bos gostermek raporu okunamaz yapiyordu.
+                            has = (p1 in nbr_attempts) or (p2 in nbr_attempts)
+                            att = (max(nbr_attempts.get(p1, 0),
+                                       nbr_attempts.get(p2, 0)) if has else '')
                             rows.append({'cell_1':cs[i],'cell_2':cs[j],
                                 'common_neighbor':ca,'pci':pv,
                                 'carrier': carrier_map.get(str(cs[i]), ''),
@@ -2061,6 +2063,57 @@ def detect_mod30_conflicts(df, nb, pci='pci', cell_to_sector=None, nbr_attempts=
     (LTE TS 36.211 §5.5.1.3, NR TS 38.211 §6.3.1.1 / §6.4.1.3).
     NOT PCFICH/PHICH — those map by PCI mod 2*N_RB."""
     return _mod_conflict(df, nb, pci, 30, 'MOD30_CONFLICT', 'LOW', 'UL DM-RS / SRS dizi grubu çakışması', cell_to_sector, nbr_attempts, _loc_az_cache, carrier_map)
+
+def detect_cosector_inconsistency(df, sector_groups, pci_col='pci', rsi_col='rsi'):
+    """Co-sector cells that do NOT share a PCI (or RSI).
+
+    Every conflict check skips co-sector pairs on the grounds that cells on one
+    antenna, differing only in carrier, share a PCI by design.  Nothing ever
+    verified that they actually do — so a sector whose carriers disagree slips
+    through silently, and the disagreement shows up instead as a phantom
+    "co-site collision" against some other sector once carriers are ignored.
+
+    This is a configuration finding, not a 3GPP conflict: cells on different
+    carriers cannot interfere. It is reported because it breaks the operator's
+    own convention, and because the skip above assumes the convention holds.
+    """
+    rows = []
+    for sec_key, members in (sector_groups or {}).items():
+        members = [str(m) for m in members]
+        vals = {}
+        for col, name in ((pci_col, 'PCI'), (rsi_col, 'RSI')):
+            if col not in df.columns:
+                continue
+            m = dict(zip(df['cell_id'].astype(str), df[col]))
+            seen = [(c, m.get(c)) for c in members if c in m and pd.notna(m.get(c))]
+            distinct = {v for _, v in seen}
+            if len(distinct) > 1:
+                counts = defaultdict(int)
+                for _, v in seen:
+                    counts[v] += 1
+                majority = max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+                vals[name] = (seen, majority, distinct)
+        if not vals:
+            continue
+        car = dict(zip(df['cell_id'].astype(str), df['carrier'])) \
+            if 'carrier' in df.columns else {}
+        for name, (seen, majority, distinct) in vals.items():
+            odd = [c for c, v in seen if v != majority]
+            rows.append({
+                'sector': sec_key,
+                'parametre': name,
+                'cells': len(seen),
+                'degerler': ', '.join(str(int(v)) for v in sorted(distinct)),
+                'cogunluk': int(majority),
+                'sapan_hucre': ', '.join(sorted(odd)),
+                'sapan_tasiyici': ', '.join(sorted(
+                    {str(car.get(c, '')) for c in odd if car.get(c)})),
+                'type': 'COSECTOR_INCONSISTENT',
+                'severity': 'MEDIUM',
+                'description': f'Aynı sektördeki hücreler farklı {name} taşıyor',
+            })
+    return pd.DataFrame(rows)
+
 
 # ============================================================
 # RSI Conflict (Cell-Range-Aware)
@@ -2238,8 +2291,9 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
                       check_mod30=None, check_rsi=True,
                       include_intra_site=True, external_neighbors=None,
                       cell_to_sector=None, progress_callback=None,
-                      check_mod4=False, carrier_map=None):
+                      check_mod4=False, carrier_map=None, sector_groups=None):
     technology = norm_tech(technology)  # UI = tek otorite
+    sector_groups_for_check = sector_groups or {}
     def _prog(pct, msg=''):
         if progress_callback:
             progress_callback(pct, msg)
@@ -2283,6 +2337,8 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
     m30 = detect_mod30_conflicts(df, nb, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_mod30 else pd.DataFrame()
     _prog(80, 'RSI çakışma tespiti...')
     rsi = detect_rsi_collisions(df, nb, 'rsi', technology, cell_to_sector=c2s, nbr_attempts=na, _loc_az_cache=_lac, carrier_map=cm) if check_rsi else pd.DataFrame()
+    _prog(88, 'Co-sektör tutarlılığı...')
+    cosec = detect_cosector_inconsistency(df, sector_groups_for_check)
     _prog(90, 'Skor hesaplanıyor...')
     tc = len(df)
     # Neighbour pairs: the full graph, and the same-carrier subset that the
@@ -2375,6 +2431,7 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
          'cosite_mod4_count': cosite_m4,
          'neighbor_sources': dict(src_counts),
          'pairs_with_ho_attempts': len(nbr_attempts),
+         'cosector_inconsistent_count': len(cosec),
          'cells_with_issues':len(set(
              (col['cell_1'].tolist() if len(col)>0 else [])+(col['cell_2'].tolist() if len(col)>0 else [])+
              (con['cell_1'].tolist() if len(con)>0 else [])+(con['cell_2'].tolist() if len(con)>0 else []))),
@@ -2385,7 +2442,8 @@ def run_full_analysis(df, radius_km, technology='LTE', use_antenna_direction=Tru
             'collisions':col,'confusions':con,
             'mod3_conflicts':m3,'mod4_conflicts':m4,
             'mod6_conflicts':m6,'mod30_conflicts':m30,
-            'rsi_collisions':rsi,'carrier_map':cm,'summary':s}
+            'rsi_collisions':rsi,'cosector_inconsistent':cosec,
+            'carrier_map':cm,'summary':s}
 
 def build_neighbor_table(df, neighbors, nbr_sources=None, nbr_attempts=None):
     rows = []

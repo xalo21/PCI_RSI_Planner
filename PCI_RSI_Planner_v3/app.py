@@ -426,6 +426,7 @@ Hiçbiri yoksa tüm ağ tek taşıyıcı sayılır.
                                             include_intra_site, ext_nb,
                                             check_mod4=check_mod4,
                                             cell_to_sector=st.session_state.cell_to_sector,
+                                            sector_groups=st.session_state.sector_groups,
                                             progress_callback=_analysis_progress)
                 _prog_bar.progress(95, text='📊 Komşuluk tablosu oluşturuluyor...')
                 st.session_state.results = results
@@ -694,6 +695,28 @@ with tab2:
                 _warn_parts.append(f"**{_cs_m4}** co-site Mod4 (aynı site, farklı sektör — SSB DMRS aynı)")
             st.warning("⚠️ " + ", ".join(_warn_parts) + ". Co-site hücrelerinde PCI/mod3/mod4 **kesinlikle** farklı olmalıdır!")
 
+        # ── Co-sector consistency ─────────────────────────────
+        _cosec = results.get('cosector_inconsistent')
+        if _cosec is not None and len(_cosec) > 0:
+            st.markdown("---")
+            st.markdown("### 🔀 Co-sektör Tutarsızlığı")
+            st.warning(
+                f"⚠️ **{len(_cosec)} sektör grubunda** aynı sektördeki hücreler "
+                f"farklı PCI/RSI taşıyor. Bu bir 3GPP çakışması **değil** — farklı "
+                f"taşıyıcıdaki hücreler birbirini etkilemez — ama operatör "
+                f"konvansiyonunu bozuyor ve analiz co-sektör çiftlerini "
+                f"\"tasarım gereği aynı\" varsayarak atlıyor.")
+            st.dataframe(_cosec[['sector', 'parametre', 'degerler', 'cogunluk',
+                                 'sapan_hucre', 'sapan_tasiyici']],
+                         use_container_width=True, hide_index=True, height=260)
+            _dev = _cosec['sapan_tasiyici'].astype(str).str.split(', ').explode()
+            _dev = _dev[_dev != ''].value_counts()
+            if len(_dev):
+                st.caption("ℹ️ Çoğunluktan sapan hücrelerin taşıyıcı dağılımı: "
+                           + ", ".join(f"**{k}**: {v}" for k, v in _dev.items())
+                           + ". Tek bir katman öne çıkıyorsa o katmanın PCI/RSI "
+                             "ataması diğerlerinden kaymış demektir.")
+
         # ── Traffic exposed to conflicts ──────────────────────
         _att_tot = s.get('attempts_total') or 0
         if _att_tot:
@@ -714,6 +737,13 @@ with tab2:
             st.caption("ℹ️ Skor çakışma **sayısını** ölçer; bu ise o çakışmaların "
                        "kaç handover'ı etkilediğini gösterir. Skora dahil edilmez, "
                        "yanında okunur.")
+            st.caption(f"ℹ️ Çakışma tablolarındaki `ho_attempts` sütunu, çift "
+                       f"harici komşuluk listesinde **yoksa boş** kalır — sıfır "
+                       f"deneme demek değildir. Listede {len(results.get('neighbor_attempts', {})):,} "
+                       f"çift var; geri kalan komşuluklar mesafe+anten veya "
+                       f"aynı-site kaynaklı. Co-site çiftlerinin çoğu HO "
+                       f"listesinde bulunmaz, o yüzden Collision satırları "
+                       f"genelde boş görünür.")
 
         # ── Per-carrier breakdown ─────────────────────────────
         _pcar = s.get('per_carrier') or []

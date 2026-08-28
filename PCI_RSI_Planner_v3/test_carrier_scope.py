@@ -232,7 +232,36 @@ for _lat0, _label in ((37.8, 'Burdur ~37.8N'), (41.3, 'Samsun ~41.3N'),
               f"{_label}, R={_R} km: {len(_brute)} ciftin {len(_miss)}'i kaciyor")
 
 # ============================================================
-print("\n=== 9. build_carrier_map: bos carrier hucresi cozulmeli ===")
+print("\n=== 9. Co-sektor tutarsizligi tespiti ===")
+# Analiz co-sektor ciftlerini "tasarim geregi ayni PCI" varsayarak atliyor ve
+# hicbir sey bu varsayimin gecerli oldugunu dogrulamiyordu.  Gecerli degilse
+# tutarsizlik, tasiyici korlugunde sahte bir "co-site collision" olarak
+# goruluyor, tasiyici kapsami acikken ise hic gorunmuyordu.
+from pci_engine import detect_cosector_inconsistency as _dci
+
+_d = pd.DataFrame({
+    'cell_id': ['CA', 'CB', 'DA', 'X1', 'X2'],
+    'pci': [100, 100, 250, 7, 7],
+    'rsi': [10, 10, 10, 20, 33],
+    'carrier': ['AR1', 'AR2', 'AR3', 'AR1', 'AR2'],
+})
+_t = _dci(_d, {'SEC1': ['CA', 'CB', 'DA'], 'SEC2': ['X1', 'X2']})
+_pci_rows = _t[_t['parametre'] == 'PCI'] if len(_t) else _t
+check(len(_pci_rows) == 1, f"tek PCI tutarsizligi bulundu ({len(_pci_rows)})")
+if len(_pci_rows):
+    _r = _pci_rows.iloc[0]
+    check(_r['sector'] == 'SEC1', "dogru sektor isaretlendi")
+    check(_r['cogunluk'] == 100, f"cogunluk 100 ({_r['cogunluk']})")
+    check(_r['sapan_hucre'] == 'DA', f"sapan hucre DA ({_r['sapan_hucre']})")
+    check(_r['sapan_tasiyici'] == 'AR3', f"sapan tasiyici AR3 ({_r['sapan_tasiyici']})")
+_rsi_rows = _t[_t['parametre'] == 'RSI'] if len(_t) else _t
+check(len(_rsi_rows) == 1 and _rsi_rows.iloc[0]['sector'] == 'SEC2',
+      "RSI tutarsizligi SEC2'de bulundu")
+_ok = _dci(pd.DataFrame({'cell_id': ['A', 'B'], 'pci': [5, 5], 'rsi': [1, 1],
+                         'carrier': ['AR1', 'AR2']}), {'S': ['A', 'B']})
+check(len(_ok) == 0, "tutarli sektor rapor edilmiyor")
+
+print("\n=== 10. build_carrier_map: bos carrier hucresi cozulmeli ===")
 # Yeni hucre bulucu, 'carrier' sutunu ZATEN olan bir frame'e satir ekliyor ve
 # yeni satirda o sutun bos kaliyor.  Bos hucre 'bilinmeyen' sayilirsa hucre
 # hicbir komsuyla ayni tasiyicida olmaz ve KISITSIZ planlanir — sessizce.
@@ -249,7 +278,7 @@ check(_m['NEW'] == _m['A'], "yeni hucre A ile ayni tasiyicida")
 _m2 = _bcm(pd.concat([_ex, pd.DataFrame([{'cell_id': 'NOCAR'}])], ignore_index=True))
 check(_m2['NOCAR'] == CARRIER_UNKNOWN, "hicbir kaynak yoksa bilinmiyor kalir")
 
-print("\n=== 10. Her plotly_chart benzersiz bir key almali ===")
+print("\n=== 11. Her plotly_chart benzersiz bir key almali ===")
 # Streamlit eleman ID'sini tur + parametrelerden uretir, dolayisiyla ayni
 # grafigi iki kez cizmek StreamlitDuplicateElementId atar. Plan sonrasi blok
 # 'Mevcut' histogramini kasitli olarak tekrar cizdigi icin bu kacinilmaz —
