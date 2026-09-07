@@ -27,4 +27,8 @@ enableCORS = true
 maxUploadSize = 500
 
 [theme]
-base = "light"
+# "dark" = koyu, "light" = acik.
+# Bu satiri tamamen silerseniz Streamlit her kullanicinin kendi tarayici/
+# isletim sistemi temasini kullanir -- cok kullanicili kurulumda herkes
+# kendi tercihini gorur.  Sabit bir gorunum istendigi icin dark secildi.
+base = "dark"
