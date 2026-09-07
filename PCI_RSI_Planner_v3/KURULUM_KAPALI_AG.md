@@ -19,31 +19,29 @@ Python kurulumunda **"Add Python to PATH"** kutusunu işaretleyin.
 
 ## 2. Neyi kopyalayacaksınız
 
-Sadece v3 kuracaksanız v2, `.git` ve `.claude` klasörlerine gerek yok.
-**Kopyalanacaklar (toplam ~162 MB):**
+**Sadece `PCI_RSI_Planner_v3` klasörünü.** Bu klasör kendi kendine yeter —
+kurulumu, paketleri ve uygulaması içinde. Başka hiçbir şeye ihtiyacı yok.
 
 ```
-hedef_klasor\
-├── setup.bat              ← kurulumu yapar
-├── requirements.txt       ← paket listesi
-├── wheels\                ← 161 MB, offline kurulumun TEK kaynağı
-├── KURULUM_KAPALI_AG.md   ← bu dosya
-└── PCI_RSI_Planner_v3\    ← uygulamanın tamamı
-    └── .streamlit\        ← GİZLİ KLASÖR, atlanmamalı
+PCI_RSI_Planner_v3\          ← ~162 MB, tek parça kopyalayın
+├── setup.bat                ← kurulumu yapar
+├── run_v3_offline.bat       ← kapalı ağda çalıştırır
+├── run_v3.bat               ← internet varsa (harita çalışır)
+├── requirements.txt
+├── wheels\                  ← 161 MB, offline kurulumun TEK kaynağı
+├── .streamlit\              ← GİZLİ KLASÖR, atlanmamalı
+├── app.py, pci_engine.py, ... (uygulama)
+└── KURULUM_KAPALI_AG.md     ← bu dosya
 ```
 
-**Kopyalanmayacaklar:** `PCI_RSI_Planner_v2\` (ayrı uygulama), `.git\`
-(sürüm geçmişi), `.claude\`, `__pycache__\`.
+Depodaki diğer her şey (`PCI_RSI_Planner_v2\`, `.git\`, `.claude\`, kökteki
+`setup.bat`) v3 için **gereksizdir**.
 
-> ⚠️ **`.streamlit` gizli bir klasördür.** Windows Gezgini'nde "Gizli öğeler"
-> kapalıyken dosyaları tek tek seçerseniz atlanır. Atlanırsa telemetri açık
-> kalır (açılış yavaşlar) ve sunucu yalnızca localhost'u dinler — **ağdaki
-> diğer makineler erişemez.** En güvenlisi: dosyaları tek tek değil,
-> `PCI_RSI_Planner_v3` klasörünün **kendisini** kopyalayın.
-
-> ⚠️ **`PCI_RSI_Planner_v3` klasörünü tek başına kopyalamayın.** Başlatma
-> dosyaları sanal ortamı bir üst klasörde (`..\.venv`) arar; `setup.bat`,
-> `requirements.txt` ve `wheels\` de o üst klasörde olmalıdır.
+> ⚠️ **Klasörü tek parça kopyalayın, içindeki dosyaları tek tek seçmeyin.**
+> `.streamlit` gizli bir klasördür; Windows Gezgini'nde "Gizli öğeler"
+> kapalıyken dosya dosya seçerseniz atlanır. Atlanırsa telemetri açık kalır
+> (açılış yavaşlar) ve sunucu yalnızca localhost'u dinler — **ağdaki diğer
+> makineler erişemez**, üstelik hata da vermez.
 
 > ⚠️ **GitHub'dan `git clone` yapmayın:** `.gitignore` `wheels/` klasörünü
 > hariç tutar, klonda paketler gelmez ve internetsiz kurulum yapılamaz.
@@ -51,23 +49,26 @@ hedef_klasor\
 
 ### Doğrulandı
 
-Yukarıdaki liste — v2, `.git` ve `.claude` olmadan — ayrı bir klasöre
-kopyalanıp baştan sona test edildi: offline kurulum 51 paketi sorunsuz
-kurdu, 5 test setinin tamamı geçti, uygulama 8 sekmeyle hatasız açıldı,
-`config.toml` okundu (`gatherUsageStats=False`, `address=0.0.0.0`, `port=8502`).
+Yalnızca `PCI_RSI_Planner_v3` klasörü ayrı bir yere kopyalanıp baştan sona
+test edildi: offline kurulum 51 paketi sorunsuz kurdu, 5 test setinin tamamı
+geçti, uygulama 8 sekmeyle hatasız açıldı, `config.toml` okundu
+(`gatherUsageStats=False`, `address=0.0.0.0`, `port=8502`).
 
 ## 3. Kurulum
+
+Kopyaladığınız klasörün içinde:
 
 ```
 setup.bat
 ```
 
-Sanal ortam oluşturur ve tüm kütüphaneleri `wheels/` klasöründen internetsiz kurar.
+Sanal ortamı (`.venv`) aynı klasörde oluşturur ve tüm kütüphaneleri
+`wheels\` klasöründen internetsiz kurar.
 
 ## 4. Çalıştırma
 
 ```
-PCI_RSI_Planner_v3\run_v3_offline.bat
+run_v3_offline.bat
 ```
 
 Bu dosya `PCI_OFFLINE=1` ile başlatır ve açılışta erişim adreslerini yazar.
@@ -86,7 +87,7 @@ Sonra ağdaki herkes tarayıcıdan erişir:
 http://<sunucu-makine-ip>:8502
 ```
 
-Sadece bu makineden erişim isterseniz [.streamlit/config.toml](PCI_RSI_Planner_v3/.streamlit/config.toml)
+Sadece bu makineden erişim isterseniz [.streamlit/config.toml](.streamlit/config.toml)
 içinde `address = "127.0.0.1"` yapın.
 
 ---
@@ -146,6 +147,6 @@ Güvenlik duvarı kuralı eklenmemiş (adım 5) veya `config.toml` içinde
 `address` `127.0.0.1` olarak ayarlanmış.
 
 **Açılış çok yavaş**
-[.streamlit/config.toml](PCI_RSI_Planner_v3/.streamlit/config.toml) dosyasının
+[.streamlit/config.toml](.streamlit/config.toml) dosyasının
 uygulama klasöründe olduğundan emin olun; `gatherUsageStats = false` olmazsa
 Streamlit her açılışta ulaşamayacağı telemetri sunucusunu bekler.

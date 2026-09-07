@@ -23,8 +23,17 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# v2 kardes klasorde durur; ikisi de ust klasordeki .venv'i paylasir.
+# Bu bir GELISTIRME aracidir ve tanimi geregi iki surumu de ister.
+# v3 klasoru dagitimda tek basina kopyalanabildigi icin v2 yaninda
+# olmayabilir; o zaman sessizce yanlis sonuc uretmek yerine durup soyle.
 V2 = os.path.join(os.path.dirname(HERE), 'PCI_RSI_Planner_v2')
+if not os.path.isdir(V2):
+    sys.exit(
+        f"HATA: v2 klasoru bulunamadi -> {V2}\n"
+        "  compare_v2_v3.py bir A/B karsilastirma aracidir; calismak icin\n"
+        "  PCI_RSI_Planner_v2 klasorunun v3 ile YAN YANA durmasi gerekir.\n"
+        "  Bu bir dagitim kopyasiysa arac zaten gerekli degil -- uygulamayi\n"
+        "  run_v3.bat / run_v3_offline.bat ile calistirin.")
 
 # v3'un kolon adi normalizasyonunu kullan (v2'ninkiyle ayni)
 sys.path.insert(0, HERE)

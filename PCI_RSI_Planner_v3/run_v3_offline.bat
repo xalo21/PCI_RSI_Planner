@@ -12,8 +12,9 @@ rem beyaz bir kutu olur ve calismadigi belli bile olmaz.  Diger tum
 rem sekmeler (analiz, planlama, raporlar, Excel, Nokia XML) tam calisir.
 set "PCI_OFFLINE=1"
 
-rem Ust klasordeki sanal ortami tercih et, yoksa sistem python'una dus.
-set "PY=..\.venv\Scripts\python.exe"
+rem Bu klasordeki sanal ortami kullan (setup.bat olusturur),
+rem yoksa sistem python'una dus.
+set "PY=.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
 echo Erisim adresleri:

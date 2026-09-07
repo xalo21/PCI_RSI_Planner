@@ -13,14 +13,30 @@ PCI_RSI_Planner_v3/   run_v3.bat   ->  http://localhost:8502   (güncel)
 
 ## Kurulum
 
-Bir kez, kök klasörde:
+### v3 — kendi kendine yeter
+
+`PCI_RSI_Planner_v3/` klasörü **tek başına taşınabilir**: kurulumu, çevrimdışı
+paketleri (`wheels/`), yapılandırması ve uygulaması hep içinde. Klasörü
+kopyalayın, içinde:
+
+```
+setup.bat            ->  .venv'i aynı klasörde, çevrimdışı kurar
+run_v3.bat           ->  internet varsa (harita çalışır)
+run_v3_offline.bat   ->  kapalı ağ / kurum içi (harita kapalı)
+```
+
+İnternet erişimi olmayan bir kuruma dağıtım için:
+[`PCI_RSI_Planner_v3/KURULUM_KAPALI_AG.md`](PCI_RSI_Planner_v3/KURULUM_KAPALI_AG.md)
+
+### v2 — kökteki setup.bat
 
 ```
 setup.bat
 ```
 
-`wheels/` içindeki paketlerden çevrimdışı bir `.venv` oluşturur. **İki uygulama
-da bu tek sanal ortamı paylaşır** — `requirements.txt` de kökte, tek nüsha.
+Kök klasörde kendi `.venv`'ini kurar. Çevrimdışı paketleri
+`PCI_RSI_Planner_v3/wheels/` içinden okur — 161 MB'lık klasörün iki nüshasını
+tutmuyoruz.
 
 ## Hangi sürümü kullanmalı
 
@@ -60,5 +76,9 @@ bazlı PRACH parametreleri ve plan çıktılarını diff'ler. Bir planı devreye
 | `master` | v2'nin dondurulmuş anlık görüntüsü, `v2.0` etiketiyle. Kök dizinde, tarihsel hâliyle |
 | `v3-rewrite` | Güncel çalışma: her iki uygulama da kendi klasöründe |
 
-`wheels/` (~90 MB çevrimdışı paket önbelleği) ve `.venv/` sürüm kontrolüne dahil
-değildir; `setup.bat` ikisini de yerelde üretir.
+`PCI_RSI_Planner_v3/wheels/` (~161 MB çevrimdışı paket önbelleği, Python 3.12 ve
+3.14 için ayrı setler) ve `.venv/` sürüm kontrolüne dahil **değildir**.
+
+> ⚠️ Bu yüzden hedef makineye `git clone` ile kurulum yapılamaz — klonda
+> `wheels/` gelmez ve internetsiz ortamda paketler indirilemez. Dağıtım için
+> klasörü dosya kopyası (USB vb.) ile taşıyın.

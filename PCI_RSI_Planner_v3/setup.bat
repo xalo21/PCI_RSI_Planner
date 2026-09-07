@@ -1,27 +1,14 @@
 @echo off
 chcp 65001 >nul
 echo ============================================================
-echo  TürkTelekom PCI/RSI Planner v2 - Otomatik Kurulum (Offline)
+echo  TürkTelekom PCI/RSI Planner v3 - Otomatik Kurulum (Offline)
 echo  Python 3.12 veya 3.14 — Windows x64
 echo ============================================================
 echo.
-echo  NOT: Bu kurulum v2 icindir. v3 kendi klasorunde bagimsizdir:
-echo       PCI_RSI_Planner_v3\setup.bat
-echo.
 
-REM Bat dosyasinin bulundugu klasore gec
+REM Bat dosyasinin bulundugu klasore gec — bu klasor kendi kendine yeter:
+REM wheels, requirements.txt ve uygulama hep birlikte burada.
 cd /d "%~dp0"
-
-REM wheels klasoru v3'un icinde durur (161 MB, iki kopya tutmuyoruz).
-set "WHEELS=PCI_RSI_Planner_v3\wheels"
-if not exist "%WHEELS%" (
-    echo [HATA] %WHEELS% bulunamadi.
-    echo   v2'nin offline kurulumu v3 klasorundeki wheels'i kullanir.
-    echo   Yalnizca v3 kurulacaksa bu dosyayi degil,
-    echo   PCI_RSI_Planner_v3\setup.bat dosyasini calistirin.
-    pause
-    exit /b 1
-)
 
 REM Python kontrolu — PATH'te veya standart konumlarda ariyoruz
 set PYTHON_EXE=
@@ -82,13 +69,24 @@ if %ERRORLEVEL% NEQ 0 (
     if %ERRORLEVEL% EQU 2 exit /b 1
 )
 
+REM wheels klasoru olmadan offline kurulum yapilamaz — erken ve net soyle.
+if not exist "wheels" (
+    echo.
+    echo [HATA] wheels klasoru bulunamadi!
+    echo   Offline kurulumun tek kaynagi odur ^(~161 MB^).
+    echo   Klasoru kopyalarken atlanmis olabilir, ya da GitHub'dan klonlanmis
+    echo   olabilir ^(.gitignore wheels klasorunu haric tutar^).
+    echo   Cozum: kaynak makineden dosya kopyasi ile tasiyin.
+    pause
+    exit /b 1
+)
+
 REM Eski venv varsa sil
 if exist .venv (
     echo Eski sanal ortam siliniyor...
     rmdir /s /q .venv
 )
 
-REM Venv olustur
 echo.
 echo [1/3] Sanal ortam olusturuluyor...
 %PYTHON_EXE% -m venv .venv
@@ -98,22 +96,20 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-REM pip'i guncelle (venv icindeki pip eski olabilir)
 echo [2/3] pip guncelleniyor...
-.venv\Scripts\python.exe -m pip install --no-index --find-links=%WHEELS% pip 2>nul
+.venv\Scripts\python.exe -m pip install --no-index --find-links=wheels pip 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo   pip wheel bulunamadi, mevcut pip ile devam ediliyor...
 )
 
-REM Kutuphaneleri offline wheel'lardan yukle
 echo [3/3] Kutuphaneler offline yukleniyor...
-.venv\Scripts\python.exe -m pip install --no-index --find-links=%WHEELS% -r requirements.txt
+.venv\Scripts\python.exe -m pip install --no-index --find-links=wheels -r requirements.txt
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [HATA] Bazi kutuphaneler yuklenemedi!
     echo   Olasiliklar:
     echo     1. wheels klasorunde eksik paket olabilir
-    echo     2. Python versiyonu uyumsuz olabilir (3.12.x veya 3.14.x gerekli)
+    echo     2. Python versiyonu uyumsuz olabilir ^(3.12.x veya 3.14.x gerekli^)
     echo   Detayli hata icin yukardaki ciktiyi inceleyin.
     pause
     exit /b 1
@@ -123,6 +119,8 @@ echo.
 echo ============================================================
 echo  Kurulum tamamlandi!
 echo.
-echo  Calistirmak icin: PCI_RSI_Planner_v2 klasorundeki run.bat
+echo  Calistirmak icin:
+echo    run_v3_offline.bat   ^<-- kapali ag / kurum ici ^(harita kapali^)
+echo    run_v3.bat           ^<-- internet varsa ^(harita calisir^)
 echo ============================================================
 pause
