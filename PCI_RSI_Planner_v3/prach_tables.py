@@ -1,12 +1,16 @@
 """
-3GPP TS 36.211 §5.7 tablolari — spec metninden cikarilmistir.
-=============================================================
-Kaynak: 3GPP TS 36.211, bolum 5.7 (PRACH).
-Cikarim: itecspec.com/3gpp/36.211 HTML'inden otomatik ayristirma, ardindan
-yapisal dogrulama (kok siralarinda fiziksel kokler (u, N_ZC-u) ciftleri
-halinde gelir; her cift N_ZC'ye tamamlanmali, tum degerler benzersiz olmali).
+3GPP TS 36.211 §5.7 ve TS 38.211 §6.3.3.1 PRACH tablolari — spec metninden cikarilmistir.
+=====================================================================================
+LTE: 3GPP TS 36.211 bolum 5.7.  itecspec.com HTML'inden otomatik ayristirma,
+ardindan yapisal dogrulama (kok siralarinda fiziksel kokler (u, N_ZC-u)
+ciftleri halinde gelir; her cift N_ZC'ye tamamlanmali, tum degerler benzersiz
+olmali).  2026-09: N_CS tablolari resmi ETSI TS 136 211 V19.3.0 PDF'iyle
+yeniden karsilastirildi — birebir ayni.
 
-ELLE DUZENLEMEYIN. Yeniden uretmek icin scratchpad/extract_spec2.py.
+NR: dosyanin sonundaki N_CS tablolari ETSI TS 138 211 V19.4.0 PDF'inden
+otomatik ayristirildi (bkz. o bolumun basligi).
+
+ELLE DUZENLEMEYIN.
 """
 
 # Tablo 5.7.1-2 — PRACH config index -> preamble format (FDD, frame type 1).
@@ -125,3 +129,50 @@ ROOT_ORDER_139 = (
      57,  82,  58,  81,  59,  80,  60,  79,  61,  78,  62,  77,  63,  76,  64,  75,
      65,  74,  66,  73,  67,  72,  68,  71,  69,  70,
 )
+
+
+# ============================================================================
+# 3GPP TS 38.211 §6.3.3.1 — NR N_CS tablolari
+# Kaynak: ETSI TS 138 211 V19.4.0 (2026-07) = 3GPP TS 38.211 v19.4.0, PDF
+# metninden otomatik ayristirma; sayfa goruntusuyle gozle de karsilastirildi.
+# Ayni cikarimla LTE tablolari (ETSI TS 136 211 V19.3.0) yukaridakilerle
+# birebir ayni cikti.  None = spec'te '-' (yapilandirilamaz).
+# ============================================================================
+
+# Tablo 6.3.3.1-5 — L_RA=839, delta_f_RA=1.25 kHz (format 0,1,2), sinirsiz kume
+NR_NCS_1P25_UNRESTRICTED_SPEC = {
+    0: 0, 1: 13, 2: 15, 3: 18, 4: 22, 5: 26, 6: 32, 7: 38, 8: 46, 9: 59, 10: 76, 11: 93, 12: 119, 13: 167, 14: 279, 15: 419
+}
+
+# Tablo 6.3.3.1-5 — kisitli kume tip A
+NR_NCS_1P25_RESTRICTED_A_SPEC = {
+    0: 15, 1: 18, 2: 22, 3: 26, 4: 32, 5: 38, 6: 46, 7: 55, 8: 68, 9: 82, 10: 100, 11: 128, 12: 158, 13: 202, 14: 237, 15: None
+}
+
+# Tablo 6.3.3.1-5 — kisitli kume tip B
+NR_NCS_1P25_RESTRICTED_B_SPEC = {
+    0: 15, 1: 18, 2: 22, 3: 26, 4: 32, 5: 38, 6: 46, 7: 55, 8: 68, 9: 82, 10: 100, 11: 118, 12: 137, 13: None, 14: None, 15: None
+}
+
+# Tablo 6.3.3.1-6 — L_RA=839, delta_f_RA=5 kHz (format 3), sinirsiz kume.
+# 1.25 kHz tablosundan FARKLIDIR (zcz=5: 41 vs 26).
+NR_NCS_5_UNRESTRICTED_SPEC = {
+    0: 0, 1: 13, 2: 26, 3: 33, 4: 38, 5: 41, 6: 49, 7: 55, 8: 64, 9: 76, 10: 93, 11: 119, 12: 139, 13: 209, 14: 279, 15: 419
+}
+
+# Tablo 6.3.3.1-6 — kisitli kume tip A
+NR_NCS_5_RESTRICTED_A_SPEC = {
+    0: 36, 1: 57, 2: 72, 3: 81, 4: 89, 5: 94, 6: 103, 7: 112, 8: 121, 9: 132, 10: 137, 11: 152, 12: 173, 13: 195, 14: 216, 15: 237
+}
+
+# Tablo 6.3.3.1-6 — kisitli kume tip B
+NR_NCS_5_RESTRICTED_B_SPEC = {
+    0: 36, 1: 57, 2: 60, 3: 63, 4: 65, 5: 68, 6: 71, 7: 77, 8: 81, 9: 85, 10: 97, 11: 109, 12: 122, 13: 137, 14: None, 15: None
+}
+
+# Tablo 6.3.3.1-7 — L_RA=139 (kisa formatlar A/B/C).
+# Ayni tablodaki L_RA=571 ve L_RA=1151 sutunlari yalnizca 480/960 kHz
+# (FR2-2) icindir; bu arac o yapilandirmalari desteklemiyor.
+NR_NCS_L139_SPEC = {
+    0: 0, 1: 2, 2: 4, 3: 6, 4: 8, 5: 10, 6: 12, 7: 13, 8: 15, 9: 17, 10: 19, 11: 23, 12: 27, 13: 34, 14: 46, 15: 69
+}

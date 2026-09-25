@@ -79,8 +79,20 @@ def ref_window_us(delta_f_ra_khz):
 
 
 def ref_cell_range_km(ncs, l_ra, delta_f_ra_khz):
-    """r = Ncs / (L_RA * delta_f_RA) * c / 2  (gecikme yayilimi payi haric)."""
-    return ncs / l_ra * (1.0 / (delta_f_ra_khz * 1000.0)) * 3e8 / 2 / 1000.0
+    """Bir Ncs'in destekledigi en buyuk hucre yaricapi (km).
+
+    Sesia/Toufik/Baker, "LTE - The UMTS Long Term Evolution", 2. baski,
+    denklem 17.10:  Ncs >= ceil((20/3 r + tau_ds) Nzc / Tseq) + n_g, 3GPP Ncs
+    kumesi tau_ds = 5.2 us ve n_g = 2 ile tasarlanmistir (s.390).  Pay yalnizca
+    dogrulandigi yerde (L_RA=839, 1.25 kHz) uygulanir; digerlerinde duz
+    gidis-donus  r = Ncs / (L_RA * delta_f_RA) * c / 2.
+    """
+    t_seq_us = 1000.0 / delta_f_ra_khz
+    if l_ra == 839 and abs(delta_f_ra_khz - 1.25) < 1e-9:
+        window_us = (ncs - 2) * t_seq_us / l_ra - 5.2
+    else:
+        window_us = ncs * t_seq_us / l_ra
+    return max(window_us, 0.0) * 1e-6 * 3e8 / 2 / 1000.0
 
 
 # ============================================================
@@ -247,6 +259,86 @@ for ncs, nzc in ((13, 839), (26, 839), (419, 839), (13, 139), (69, 139)):
          f"Ncs={ncs}, Nzc={nzc}")
 spec(g10, E.roots_needed(64, 0, 839) == 64,
      "Ncs=0 (kayma yok) -> her kok 1 preamble -> 64 kok")
+
+# ============================================================
+# NR N_CS tablolari.  Beklenen degerler ETSI TS 138 211 V19.4.0 (= 3GPP TS
+# 38.211 v19.4.0) PDF'inden cikarildi ve sayfa goruntusuyle karsilastirildi.
+# None = spec'te '-' (yapilandirilamaz) -> motor 0 dondurur.
+NR_1P25_UNR = [0, 13, 15, 18, 22, 26, 32, 38, 46, 59, 76, 93, 119, 167, 279, 419]
+NR_1P25_A   = [15, 18, 22, 26, 32, 38, 46, 55, 68, 82, 100, 128, 158, 202, 237, None]
+NR_1P25_B   = [15, 18, 22, 26, 32, 38, 46, 55, 68, 82, 100, 118, 137, None, None, None]
+NR_5_UNR    = [0, 13, 26, 33, 38, 41, 49, 55, 64, 76, 93, 119, 139, 209, 279, 419]
+NR_5_A      = [36, 57, 72, 81, 89, 94, 103, 112, 121, 132, 137, 152, 173, 195, 216, 237]
+NR_5_B      = [36, 57, 60, 63, 65, 68, 71, 77, 81, 85, 97, 109, 122, 137, None, None]
+NR_L139     = [0, 2, 4, 6, 8, 10, 12, 13, 15, 17, 19, 23, 27, 34, 46, 69]
+
+g11 = group('NR Ncs tablolari (T6.3.3.1-5 / -6 / -7)')
+for label, exp, kw in (
+        ('1.25 kHz sinirsiz', NR_1P25_UNR, dict(delta_f_ra_khz=1.25)),
+        ('1.25 kHz tip A',    NR_1P25_A,   dict(delta_f_ra_khz=1.25, restricted='typeA')),
+        ('1.25 kHz tip B',    NR_1P25_B,   dict(delta_f_ra_khz=1.25, restricted='typeB')),
+        ('5 kHz sinirsiz',    NR_5_UNR,    dict(delta_f_ra_khz=5.0)),
+        ('5 kHz tip A',       NR_5_A,      dict(delta_f_ra_khz=5.0, restricted='typeA')),
+        ('5 kHz tip B',       NR_5_B,      dict(delta_f_ra_khz=5.0, restricted='typeB')),
+        ('L_RA=139',          NR_L139,     dict(short=True))):
+    for zcz, e in enumerate(exp):
+        got = E.get_ncs(zcz, 'NR', **kw)
+        spec(g11, got == (e or 0), f"{label}, zcz={zcz}: {got} != {e}")
+# Tablo secimi hucre satirindan da dogru yapiliyor mu: NR format 3 (pcfg=23)
+# 5 kHz tablosunu okumali.  v3 2026-09'a kadar 1.25 kHz tablosunu okuyordu.
+_f3 = E._prach_params({'prach_config_index': 23, 'zero_correlation_zone': 5}, 'NR')
+spec(g11, _f3['delta_f_ra_khz'] == 5.0 and _f3['ncs'] == 41,
+     f"NR format 3, zcz=5: Ncs={_f3['ncs']} (spec 41), dfRA={_f3['delta_f_ra_khz']}")
+
+# ============================================================
+# Huawei'nin Ncs -> Cell Radius tablosu (unrestricted ve high speed sutunlari).
+# Ncs=119 -> 15.66 km satiri tablodaki bir yazim hatasi: diger 22 satirin
+# deseni 15.95 veriyor, o satir 290 m sapiyor.  Burada kasitli olarak disarida.
+HUAWEI_RADIUS_KM = {13: 0.79, 15: 1.08, 18: 1.51, 22: 2.08, 26: 2.65, 32: 3.51,
+                    38: 4.37, 46: 5.51, 55: 6.80, 59: 7.37, 68: 8.66, 76: 9.80,
+                    82: 10.66, 93: 12.23, 100: 13.23, 128: 17.23, 158: 21.52,
+                    167: 22.82, 202: 27.81, 237: 32.82, 279: 38.84, 419: 58.86}
+g12 = group('Ncs -> hucre yaricapi, 5.2 us + 2 ornek payi (Sesia 17.10)')
+for ncs, km in HUAWEI_RADIUS_KM.items():
+    got = E.cell_range_from_ncs(ncs, 839, 800.0)
+    spec(g12, abs(got - km) <= 0.02, f"Ncs={ncs}: {got:.3f} km != Huawei {km} km")
+    spec(g12, abs(got - ref_cell_range_km(ncs, 839, 1.25)) < 1e-9,
+         f"Ncs={ncs}: motor ile bagimsiz referans ayrisiyor")
+
+# ============================================================
+g13 = group('cellRange -> zcz: cell_range_from_ncs ile tam ters')
+_tables = (('LTE', {}, 0), ('LTE', {'restricted': 'typeA'}, 0),
+           ('LTE', {'restricted': 'typeB'}, 0),
+           ('NR', {}, 0), ('NR', {}, 23))                 # NR pcfg 23 = format 3
+for tech, kw, pcfg in _tables:
+    p = E._prach_params({'prach_config_index': pcfg, 'zero_correlation_zone': 1}, tech)
+    tbl = E.ncs_table(tech, kw.get('restricted', False), p['is_short'], p['delta_f_ra_khz'])
+    for zcz, ncs in sorted(tbl.items()):
+        if not ncs:
+            continue
+        m = E.cell_range_from_ncs(ncs, p['nzc'], p['tseq_us']) * 1000.0
+        if m <= 0:
+            continue
+        z1, n1 = E.derive_zcz_from_cell_range(m, tech, pcfg, **kw)
+        spec(g13, n1 == ncs,
+             f"{tech} pcfg={pcfg} {kw}: tam esik {m:.1f} m -> Ncs={n1} (beklenen {ncs})")
+        bigger = [v for v in tbl.values() if v and v > ncs]
+        if bigger:
+            z2, n2 = E.derive_zcz_from_cell_range(m + 1.0, tech, pcfg, **kw)
+            spec(g13, n2 == min(bigger),
+                 f"{tech} pcfg={pcfg} {kw}: esik + 1 m -> Ncs={n2} (beklenen {min(bigger)})")
+
+# Tasma sessiz kalmamali
+_z, _n, _ex = E.derive_zcz_from_cell_range(100000, 'LTE', 0, return_exceeded=True)
+spec(g13, _ex and _n == 419, f"100 km: Ncs={_n}, exceeded={_ex}")
+_z, _n, _ex = E.derive_zcz_from_cell_range(58000, 'LTE', 0, return_exceeded=True)
+spec(g13, not _ex and _n == 419, f"58 km: Ncs={_n}, exceeded={_ex}")
+spec(g13, E._prach_params({'cell_range': 100000}, 'LTE')['cell_range_exceeded'],
+     "_prach_params 100 km hucreyi isaretlemeli")
+spec(g13, not E._prach_params({'cell_range': 3000}, 'LTE')['cell_range_exceeded'],
+     "_prach_params 3 km hucreyi isaretlememeli")
+spec(g13, not E._prach_params({'zero_correlation_zone': 5}, 'LTE')['cell_range_exceeded'],
+     "Nokia modunda (cell_range yok) isaret olmamali")
 
 # ============================================================
 print("=" * 74)

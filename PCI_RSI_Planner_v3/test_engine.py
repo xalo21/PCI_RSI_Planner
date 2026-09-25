@@ -450,15 +450,18 @@ def main():
     print("✅ sector column override: grouping matches sector column values")
 
     # ------ Huawei cellRange → zcz reverse mapping ------
-    # 14500m → should pick zcz=12 (Ncs=119, range=17.02km ≥ 14.5km)
+    # Ranges include the 5.2 us delay spread + 2 guard samples margin and match
+    # the Huawei Ncs -> cell radius table (see test_3gpp_tables.py).
+    # 14500m → zcz=12 (Ncs=119, range=15.95km ≥ 14.5km; Ncs=93 gives 12.23km)
     zcz_14k, ncs_14k = derive_zcz_from_cell_range(14500)
     assert zcz_14k == 12 and ncs_14k == 119, f"14500m: zcz={zcz_14k}, ncs={ncs_14k}"
-    # 38000m → should pick zcz=14 (Ncs=279, range=39.89km ≥ 38km)
+    # 38000m → zcz=14 (Ncs=279, range=38.84km ≥ 38km)
     zcz_38k, ncs_38k = derive_zcz_from_cell_range(38000)
     assert zcz_38k == 14 and ncs_38k == 279, f"38000m: zcz={zcz_38k}, ncs={ncs_38k}"
-    # 3000m → should pick zcz=4 (Ncs=22, range=3.15km ≥ 3km)
+    # 3000m → zcz=6 (Ncs=32, range=3.51km).  Ncs=26 only reaches 2.65km with
+    # the margin — without it v3 picked Ncs=22 (3.15km) and under-allocated roots.
     zcz_3k, ncs_3k = derive_zcz_from_cell_range(3000)
-    assert zcz_3k == 4 and ncs_3k == 22, f"3000m: zcz={zcz_3k}, ncs={ncs_3k}"
+    assert zcz_3k == 6 and ncs_3k == 32, f"3000m: zcz={zcz_3k}, ncs={ncs_3k}"
     # 0m → safe default (zcz=5, ncs=26)
     zcz_0, ncs_0 = derive_zcz_from_cell_range(0)
     assert zcz_0 == 5 and ncs_0 == 26, f"0m: zcz={zcz_0}, ncs={ncs_0}"

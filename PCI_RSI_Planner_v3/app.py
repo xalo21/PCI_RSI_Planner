@@ -411,10 +411,17 @@ Hiçbiri yoksa tüm ağ tek taşıyıcı sayılır.
             prach_rows.append(info)
         prach_df = pd.DataFrame(prach_rows)
         cols_order = ['cell_id','cell_range_input_m','prach_config_index','zero_correlation_zone','preamble_format',
-                      'ncs','cell_range_ncs_km','cell_range_format_km',
+                      'ncs','cell_range_ncs_km','cell_range_exceeded','cell_range_format_km',
                       'preambles_per_root','roots_needed','rsi']
+        if 'cell_range_input_m' not in prach_df.columns:
+            cols_order.remove('cell_range_exceeded')   # only meaningful in Huawei mode
         prach_df = prach_df[[c for c in cols_order if c in prach_df.columns]]
         prach_df = enrich_df_with_sector_info(prach_df)
+        if 'cell_range_exceeded' in prach_df.columns and prach_df['cell_range_exceeded'].any():
+            st.warning(
+                f"⚠️ **{int(prach_df['cell_range_exceeded'].sum())} hücrede** cellRange, en büyük "
+                f"Ncs'in karşılayabileceği menzilden büyük — bu hücreler en büyük Ncs ile "
+                f"planlanıyor. Tabloda `cell_range_exceeded` sütununa bakın.")
         st.dataframe(prach_df, use_container_width=True, height=300)
         st.session_state.prach_info = prach_df
 
@@ -1885,10 +1892,18 @@ with tab4:
             st.markdown("""### 📡 PRACH / Cell Range Bilgileri
 > **PRACH Config Index** → Preamble Format (3GPP TS 36.211 Table 5.7.1-2)
 > **zeroCorrelationZoneConfig** → Ncs (3GPP TS 36.211 Table 5.7.2-2)
-> **Cell Range (Ncs)** = (Ncs / 839) × Tseq × c / 2
+> **Cell Range (Ncs)** = ((Ncs − 2) × Tseq / 839 − 5.2 µs) × c / 2  — 5.2 µs gecikme yayılımı + 2 koruma örneği payıyla (Δf_RA = 1.25 kHz)
 > **Roots Needed** = ⌈64 / ⌊839 / Ncs⌋⌉""")
             pi = st.session_state.prach_info
             if pi is not None:
+                if 'cell_range_exceeded' in pi.columns and pi['cell_range_exceeded'].any():
+                    _ex = pi[pi['cell_range_exceeded']]
+                    st.warning(
+                        f"⚠️ **{len(_ex)} hücrede** cellRange, en büyük Ncs'in karşılayabileceği "
+                        f"menzilden büyük. Bu hücreler en büyük Ncs ile planlandı, yani plan "
+                        f"yapılandırılan yarıçaptan **küçük** bir hücre için yapıldı. "
+                        f"Daha büyük menzil gerekiyorsa preamble formatını (prach_config_index) "
+                        f"kontrol edin.")
                 st.dataframe(pi, use_container_width=True, height=400)
             # Reference tables
             with st.expander("📋 3GPP Ncs Referans Tablosu (Unrestricted)"):
@@ -3118,12 +3133,15 @@ Roots Needed = ceil(64 / Preambles per Root)
 ### LTE Ncs Tablosu (Unrestricted, Nzc=839)
 | Config | Ncs | Preamble/Root | Roots | Cell Range (km) |
 |:---:|:---:|:---:|:---:|:---:|
-| 1 | 13 | 64 | 1 | 1.86 |
-| 5 | 26 | 32 | 2 | 3.72 |
-| 8 | 46 | 18 | 4 | 6.58 |
-| 11 | 93 | 9 | 8 | 13.30 |
-| 12 | 119 | 7 | 10 | 17.02 |
-| 15 | 419 | 2 | 32 | 59.93 |
+| 1 | 13 | 64 | 1 | 0.79 |
+| 5 | 26 | 32 | 2 | 2.65 |
+| 8 | 46 | 18 | 4 | 5.51 |
+| 11 | 93 | 9 | 8 | 12.24 |
+| 12 | 119 | 7 | 10 | 15.95 |
+| 15 | 419 | 2 | 32 | 58.86 |
+
+Menziller 5.2 µs gecikme yayılımı + 2 koruma örneği payıyla hesaplanır
+(aşağıdaki *Cell Range* bölümüne bakın).
 
 ### Örnek
 **Ncs=26 → 32 preamble/root → 2 root gerekli**
@@ -3140,19 +3158,28 @@ Sistem, cellRange sütunu tespit ettiğinde otomatik olarak **Huawei modu**na ge
 
 ```
 cellRange (m) → km'ye çevir
-→ Gereken minimum Ncs hesapla: Ncs = range_km × Nzc × 2000 / (Tseq × c)
-→ Ncs tablosundan en yakın (≥) zcz config değerini bul
+→ Gereken minimum Ncs:  Ncs ≥ ⌈(20/3 · r + τds) · Nzc / Tseq⌉ + ng
+                        (τds = 5.2 µs gecikme yayılımı, ng = 2 koruma örneği)
+→ Ncs tablosundan bunu karşılayan en küçük zcz değerini bul
 → RSI planlaması bu zcz ile yapılır
 ```
 
-| cellRange (m) | Hesaplanan Ncs | Eşleşen zcz | Gerçek Kapsama |
+| cellRange (m) | Gereken Ncs | Eşleşen zcz | Gerçek Kapsama |
 |:---:|:---:|:---:|:---:|
-| 3000 | ≥21.0 | 4 (Ncs=22) | 3.15 km |
-| 14500 | ≥101.4 | 12 (Ncs=119) | 17.02 km |
-| 29500 | ≥206.3 | 14 (Ncs=279) | 39.89 km |
-| 38000 | ≥265.7 | 14 (Ncs=279) | 39.89 km |
+| 3000 | ≥29 | 6 (Ncs=32) | 3.51 km |
+| 14500 | ≥109 | 12 (Ncs=119) | 15.95 km |
+| 29500 | ≥214 | 14 (Ncs=279) | 38.84 km |
+| 38000 | ≥274 | 14 (Ncs=279) | 38.84 km |
 
 > **Öncelik:** Bir hücrede hem `cell_range` hem `zero_correlation_zone` varsa, `cell_range` kullanılır.
+
+> **Huawei `prach_config_index`:** Huawei verisinde bu sütun yoksa format 0
+> (FDD, 1.25 kHz) varsayılır. Format 1-3 ya da TDD hücreler için sütunu veride
+> verin; yoksa Ncs yanlış tablo ve yanlış sequence penceresiyle türetilir.
+
+> **Taşma:** cellRange, en büyük Ncs'in karşılayabileceğinden büyükse
+> (LTE format 0 için 58.86 km) plan en büyük Ncs ile yapılır ve bu hücreler
+> PRACH raporunda `cell_range_exceeded` ile işaretlenir.
 """)
 
     # ========================================
@@ -3222,17 +3249,33 @@ Hücre Q: RSI=135, pcfg=30 (short) → max_rsi=137
 ```
 
 ### Cell Range (Hücre Menzili) Hesabı
+Bir Ncs penceresi gidiş-dönüş gecikmesini, kanalın gecikme yayılımını ve
+alıcı filtresinin taşmasını birlikte taşımak zorundadır:
 ```
-Cell Range (km) = (Ncs / Nzc) × Tseq × c / 2
-```
+Ncs ≥ ⌈(20/3 · r + τds) · Nzc / Tseq⌉ + ng        r: km, τds ve Tseq: µs
 
-| Parametre | LTE (Format 0-3) | NR Long | NR Short |
-|:---:|:---:|:---:|:---:|
-| **Nzc** | 839 | 839 | 139 |
-| **Tseq** | 800 / 1600 µs | 800 µs | 133.33 µs |
-| **c** | 3×10⁸ m/s | 3×10⁸ m/s | 3×10⁸ m/s |
+Cell Range (km) = ((Ncs − ng) × Tseq / Nzc − τds) × c / 2
+                  τds = 5.2 µs,  ng = 2 örnek
+```
+3GPP'nin 16 Ncs değeri bu varsayımla seçilmiştir (Sesia/Toufik/Baker,
+*LTE – The UMTS Long Term Evolution*, 2. baskı, denklem 17.10). Huawei'nin
+Ncs → Cell Radius tablosunu 23 satırın 22'sinde ±15 m içinde üretir.
+
+Pay yalnızca doğrulandığı yerde uygulanır: **Nzc = 839, Δf_RA = 1.25 kHz**
+(LTE format 0-3, NR format 0-2). NR format 3 ve kısa formatlar (L=139) için
+doğrulayan bir üretici tablosu olmadığından düz gidiş-dönüş formülü
+`(Ncs / Nzc) × Tseq × c / 2` kullanılır.
+
+| Parametre | LTE (Format 0-3) | NR Format 0-2 | NR Format 3 | NR Kısa (A/B/C) |
+|:---:|:---:|:---:|:---:|:---:|
+| **Nzc** | 839 | 839 | 839 | 139 |
+| **Tseq = 1/Δf_RA** | 800 µs | 800 µs | 200 µs | 66.67 µs (15 kHz), 33.33 µs (30 kHz) |
+| **Ncs tablosu** | TS 36.211 T5.7.2-2 | TS 38.211 T6.3.3.1-5 | TS 38.211 T6.3.3.1-6 | TS 38.211 T6.3.3.1-7 |
+| **Gecikme payı** | ✅ | ✅ | — | — |
 
 - Bu mesafe, hücrenin PRACH'ı doğru algılayabileceği maksimum mesafedir.
+- LTE format 2/3 dizisi iki kez tekrarlar; bu kapsama enerjisi kazandırır,
+  cyclic shift penceresini büyütmez. Pencere yine 800 µs'dir.
 """)
 
     # ========================================

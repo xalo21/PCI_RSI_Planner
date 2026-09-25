@@ -31,6 +31,30 @@ SPEED_OF_LIGHT = 3e8
 NZC_LONG = 839
 NZC_SHORT = 139
 
+# Cyclic-shift dimensioning margin.  A shift window of N_CS samples has to hold
+# the round-trip delay PLUS the channel delay spread PLUS a few samples of
+# receiver pulse-shaping spill-over:
+#
+#     N_CS >= ceil((20/3 * r + tau_ds) * N_ZC / T_SEQ) + n_g       r in km, us
+#
+# Sesia/Toufik/Baker, "LTE - The UMTS Long Term Evolution", 2nd ed., eq. 17.10
+# and p.390: the 3GPP N_CS set was designed "assuming a delay spread of 5.2 us
+# and 2 guard samples n_g".  (The book prints "- tau_ds"; with that sign no row
+# of any vendor table reproduces, with "+" every row does.)
+#
+# Verified against the Huawei Ncs -> cell radius table: 22 of 23 rows within
+# 15 m (the 23rd, Ncs=119 -> 15.66 km, is a typo in that table; the pattern
+# gives 15.95).  Without this margin v3 reported every range ~1.07 km too long
+# and, in Huawei mode, picked an Ncs one step too small for many radii.
+#
+# Applied only where it is verified: L_RA=839 with delta_f_RA=1.25 kHz (LTE
+# formats 0-3, NR formats 0-2).  For NR format 3 and the L_RA=139 formats the
+# same 5.2 us would eat most of the window (NR short @30 kHz, Ncs<=15 would
+# cover no cell at all), and no vendor table was available to confirm what is
+# assumed there — so those keep the plain round-trip formula.
+PRACH_DELAY_SPREAD_US = 5.2
+PRACH_GUARD_SAMPLES = 2
+
 # ============================================================
 # Technology & PCI range — single source of truth
 # ============================================================
@@ -368,6 +392,9 @@ from prach_tables import (
     LTE_PRACH_FORMAT_FDD, LTE_PRACH_FORMAT_TDD,
     LTE_NCS_RESTRICTED_A_SPEC, LTE_NCS_RESTRICTED_B_SPEC,
     LTE_NCS_FORMAT4_SPEC, ROOT_ORDER_839, ROOT_ORDER_139,
+    NR_NCS_1P25_UNRESTRICTED_SPEC, NR_NCS_1P25_RESTRICTED_A_SPEC,
+    NR_NCS_1P25_RESTRICTED_B_SPEC, NR_NCS_5_UNRESTRICTED_SPEC,
+    NR_NCS_5_RESTRICTED_A_SPEC, NR_NCS_5_RESTRICTED_B_SPEC, NR_NCS_L139_SPEC,
 )
 
 def _clean(d):
@@ -389,15 +416,21 @@ LTE_PREAMBLE_FORMATS = {
     3: {'tcp_us':684.38,  'tseq_us':1600.0, 'subframes':3},
     4: {'tcp_us':14.58,   'tseq_us':133.33, 'subframes':1}}
 
-# 3GPP TS 38.211 Table 6.3.3.1-5 – NR Ncs L=839
-NR_NCS_LONG = {
-    0:0, 1:13, 2:15, 3:18, 4:22, 5:26, 6:32, 7:38,
-    8:46, 9:59, 10:76, 11:93, 12:119, 13:167, 14:279, 15:419}
+# 3GPP TS 38.211 Table 6.3.3.1-5 – NR Ncs, L_RA=839, delta_f_RA=1.25 kHz
+# (formats 0, 1, 2).  Same values as LTE Table 5.7.2-2.
+NR_NCS_LONG = _clean(NR_NCS_1P25_UNRESTRICTED_SPEC)
+NR_NCS_LONG_RESTRICTED_A = _clean(NR_NCS_1P25_RESTRICTED_A_SPEC)
+NR_NCS_LONG_RESTRICTED_B = _clean(NR_NCS_1P25_RESTRICTED_B_SPEC)
 
-# 3GPP TS 38.211 Table 6.3.3.1-6 – NR Ncs L=139
-NR_NCS_SHORT = {
-    0:0, 1:2, 2:4, 3:6, 4:8, 5:10, 6:12, 7:13,
-    8:15, 9:17, 10:19, 11:23, 12:27, 13:34, 14:46, 15:69}
+# 3GPP TS 38.211 Table 6.3.3.1-6 – NR Ncs, L_RA=839, delta_f_RA=5 kHz (format 3).
+# A table of its own: v3 used to read format 3 from the 1.25 kHz table, so
+# zcz=5 came out as Ncs=26 where the standard says 41.
+NR_NCS_5KHZ = _clean(NR_NCS_5_UNRESTRICTED_SPEC)
+NR_NCS_5KHZ_RESTRICTED_A = _clean(NR_NCS_5_RESTRICTED_A_SPEC)
+NR_NCS_5KHZ_RESTRICTED_B = _clean(NR_NCS_5_RESTRICTED_B_SPEC)
+
+# 3GPP TS 38.211 Table 6.3.3.1-7 – NR Ncs, L_RA=139 (short formats A/B/C).
+NR_NCS_SHORT = _clean(NR_NCS_L139_SPEC)
 
 # NR PRACH Preamble Format mapping
 # Long sequence (L=839): Formats 0, 1, 2, 3
@@ -1259,30 +1292,66 @@ def decompose_pci(pci):
 # ============================================================
 # PRACH / RSI Calculations
 # ============================================================
-def get_ncs(zcz, technology='LTE', restricted=False, short=False):
-    """Ncs for a zeroCorrelationZoneConfig.
+def ncs_table(technology='LTE', restricted=False, short=False, delta_f_ra_khz=None):
+    """The zeroCorrelationZoneConfig -> Ncs table that applies to a cell.
 
-    `short` selects the L_RA=139 table.  For LTE that is preamble format 4
-    (TDD only) and has its OWN table — TS 36.211 Table 5.7.2-3 — which is not
-    the NR L=139 table and not the format 0-3 table.  v2 ignored `short` for
-    LTE entirely and read the format 0-3 values, so a format 4 cell got
-    Ncs=26 where the standard says 12.
+    Every Ncs lookup goes through here, so derivation in both directions (zcz
+    -> Ncs for Nokia, cell range -> zcz for Huawei) reads the same table.
+
+      LTE formats 0-3        TS 36.211 T5.7.2-2  (unrestricted / type A / type B)
+      LTE format 4 (L=139)   TS 36.211 T5.7.2-3  — its own table, not the NR one
+      NR  1.25 kHz (fmt 0-2) TS 38.211 T6.3.3.1-5
+      NR  5 kHz    (fmt 3)   TS 38.211 T6.3.3.1-6  — differs from 1.25 kHz
+      NR  L=139   (A/B/C)    TS 38.211 T6.3.3.1-7
+
+    Restricted sets are not defined for L_RA=139, so `restricted` is ignored
+    there.  v2 ignored `short` for LTE (a format 4 cell got Ncs=26 where the
+    standard says 12); v3 until 2026-09 ignored both `restricted` and
+    delta_f_RA for NR.
     """
     technology = norm_tech(technology)  # UI = tek otorite
-    cfg = int(zcz)
+    set_b = bool(restricted) and str(restricted).upper().endswith('B')
     if technology == 'NR':
-        return (NR_NCS_SHORT if short else NR_NCS_LONG).get(cfg, 0)
+        if short:
+            return NR_NCS_SHORT
+        if delta_f_ra_khz is not None and abs(float(delta_f_ra_khz) - 5.0) < 1e-9:
+            if restricted:
+                return NR_NCS_5KHZ_RESTRICTED_B if set_b else NR_NCS_5KHZ_RESTRICTED_A
+            return NR_NCS_5KHZ
+        if restricted:
+            return NR_NCS_LONG_RESTRICTED_B if set_b else NR_NCS_LONG_RESTRICTED_A
+        return NR_NCS_LONG
     if short:
-        return LTE_NCS_FORMAT4.get(cfg, 0)      # 0 == N/A for zcz >= 7
+        return LTE_NCS_FORMAT4                  # N/A for zcz >= 7
     if restricted:
-        tbl = (LTE_NCS_RESTRICTED_B if str(restricted).upper().endswith('B')
-               else LTE_NCS_RESTRICTED)
-        return tbl.get(cfg, 0)
-    return LTE_NCS_UNRESTRICTED.get(cfg, 0)
+        return LTE_NCS_RESTRICTED_B if set_b else LTE_NCS_RESTRICTED
+    return LTE_NCS_UNRESTRICTED
+
+
+def get_ncs(zcz, technology='LTE', restricted=False, short=False, delta_f_ra_khz=None):
+    """Ncs for a zeroCorrelationZoneConfig; 0 when the table says N/A."""
+    return ncs_table(technology, restricted, short, delta_f_ra_khz).get(int(zcz), 0)
+
+
+def _margin_applies(nzc, tseq_us):
+    """The 5.2 us + 2-sample margin is verified for L_RA=839 at 1.25 kHz only."""
+    return int(nzc) == NZC_LONG and abs(float(tseq_us) - 800.0) < 1e-6
+
 
 def cell_range_from_ncs(ncs, nzc=NZC_LONG, tseq_us=800.0):
-    if ncs == 0: return 0.0
-    return (ncs/nzc) * (tseq_us*1e-6) * SPEED_OF_LIGHT / 2 / 1000
+    """Largest cell radius (km) an Ncs supports.
+
+    Where the margin is verified (see PRACH_DELAY_SPREAD_US) the window loses
+    n_g samples and tau_ds before it is turned into distance — this reproduces
+    the vendor Ncs -> cell radius table.  Elsewhere it is the plain round trip.
+    """
+    if ncs == 0:
+        return 0.0
+    window_us = ncs * tseq_us / nzc
+    if _margin_applies(nzc, tseq_us):
+        window_us = ((ncs - PRACH_GUARD_SAMPLES) * tseq_us / nzc
+                     - PRACH_DELAY_SPREAD_US)
+    return max(window_us, 0.0) * 1e-6 * SPEED_OF_LIGHT / 2 / 1000
 
 def cell_range_from_format(fmt, tech='LTE'):
     tcp = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tcp_us']
@@ -1469,50 +1538,58 @@ def rsi_overlap(rsi1, ncs1, rsi2, ncs2, nzc=NZC_LONG, npre=64, max_rsi=LTE_RSI_C
 # ============================================================
 def derive_zcz_from_cell_range(cell_range_m, technology='LTE',
                                 preamble_format=0, restricted=False,
-                                duplex='FDD', scs_khz=None, band_mhz=None):
+                                duplex='FDD', scs_khz=None, band_mhz=None,
+                                return_exceeded=False):
     """Given a cell range in metres (e.g. Huawei cellRadius), find the
     smallest zeroCorrelationZoneConfig whose Ncs covers that range.
 
-    Returns (zcz, ncs) – the zcz config value and the corresponding Ncs.
+    "Covers" is decided by cell_range_from_ncs(), so this is its exact inverse:
+    the same table, the same delay-spread margin.  Feeding a reported range
+    back in returns the same zcz.  (It used to recompute Ncs from the range
+    with a float division, and 26.000000000000004 > 26 pushed an exact
+    boundary one zcz too high.)
+
+    Returns (zcz, ncs), or (zcz, ncs, exceeded) with return_exceeded=True.
+    `exceeded` means no configurable Ncs reaches the range: the largest one is
+    returned, and the caller should say so instead of planning silently for a
+    smaller cell than the operator configured.
     """
     technology = norm_tech(technology)  # UI = tek otorite
     cell_range_km = float(cell_range_m) / 1000.0
-    if cell_range_km <= 0:
-        return 5, 26  # safe default (same as zcz=5)
 
-    # Determine Nzc, Tseq, and the Ncs lookup table
+    # Determine Nzc, the sequence window and the Ncs table
     if technology == 'NR':
         _pcfg = int(preamble_format) if isinstance(preamble_format, (int, float)) else 0
         is_short, nzc, _dfra, _lbl = get_nr_preamble_info(_pcfg)
         if is_short:
             _dfra = nr_short_delta_f_khz(scs_khz, band_mhz)
-        tseq_us = sequence_window_us(_dfra)
-        ncs_table = NR_NCS_SHORT if is_short else NR_NCS_LONG
     else:
         fmt = get_lte_preamble_format(
             int(preamble_format) if not pd.isna(preamble_format) else 0, duplex)
+        if fmt is None:
+            fmt = 0                     # N/A index: same fallback as _prach_params
         is_short = (fmt == 4)
         nzc = NZC_SHORT if is_short else NZC_LONG
-        tseq_us = sequence_window_us(LTE_DELTA_F_RA_KHZ.get(fmt, 1.25))
-        if is_short:
-            ncs_table = LTE_NCS_FORMAT4   # TS 36.211 T5.7.2-3, not the NR table
-        elif restricted:
-            ncs_table = LTE_NCS_RESTRICTED
-        else:
-            ncs_table = LTE_NCS_UNRESTRICTED
+        _dfra = LTE_DELTA_F_RA_KHZ.get(fmt, 1.25)
+    tseq_us = sequence_window_us(_dfra)
+    table = ncs_table(technology, restricted, is_short, _dfra)
 
-    # Reverse formula: ncs_required = cell_range_km * nzc * 2 * 1000 / (tseq_us * 1e-6 * c)
-    ncs_required = cell_range_km * nzc * 2.0 * 1000.0 / (tseq_us * 1e-6 * SPEED_OF_LIGHT)
+    if cell_range_km <= 0:
+        return (5, table.get(5, 0), False) if return_exceeded else (5, table.get(5, 0))
 
-    # Find smallest zcz whose Ncs >= ncs_required (skip zcz=0 which gives Ncs=0)
-    best_zcz = max(ncs_table.keys())
-    for zcz_val in sorted(ncs_table.keys()):
-        ncs_val = ncs_table[zcz_val]
-        if ncs_val > 0 and ncs_val >= ncs_required:
-            best_zcz = zcz_val
+    # Smallest configurable Ncs whose supported range reaches the cell.  Ncs=0
+    # (no cyclic shift) is skipped: it is not a small-cell setting.
+    candidates = sorted(((v, z) for z, v in table.items() if v and v > 0))
+    best_ncs, best_zcz = candidates[-1]
+    exceeded = True
+    for ncs_val, zcz_val in candidates:
+        if cell_range_from_ncs(ncs_val, nzc, tseq_us) >= cell_range_km - 1e-9:
+            best_ncs, best_zcz, exceeded = ncs_val, zcz_val, False
             break
 
-    return best_zcz, ncs_table[best_zcz]
+    if return_exceeded:
+        return best_zcz, best_ncs, exceeded
+    return best_zcz, best_ncs
 
 
 RESTRICTED_SET_VALUES = ('unrestricted', 'typeA', 'typeB')
@@ -1625,7 +1702,17 @@ def _prach_params(row, technology='LTE', rsi=None):
     # The cyclic-shift window is ONE sequence, not the repeated total.
     tseq_us = sequence_window_us(dfra)
 
-    ncs = get_ncs(zcz, technology, restricted=restricted, short=is_short)
+    ncs = get_ncs(zcz, technology, restricted=restricted, short=is_short,
+                  delta_f_ra_khz=dfra)
+
+    # Huawei mode: does the largest configurable Ncs actually reach the
+    # configured cellRadius?  If not, the plan is for a smaller cell than the
+    # operator set up, and that must be visible rather than silently clamped.
+    cell_range_exceeded = False
+    _cr = row.get('cell_range')
+    if _cr is not None and not pd.isna(_cr) and float(_cr) > 0 and ncs:
+        cell_range_exceeded = (
+            cell_range_from_ncs(ncs, nzc, tseq_us) * 1000.0 < float(_cr) - 1e-6)
 
     # Root demand.  Unrestricted is a constant per root; restricted is not, so
     # it needs the logical->physical root order to be resolved exactly.  When
@@ -1673,6 +1760,7 @@ def _prach_params(row, technology='LTE', rsi=None):
         'roots_min': roots_min,
         'roots_max': roots_max,
         'feasible': feasible,
+        'cell_range_exceeded': cell_range_exceeded,
     }
 
 
@@ -1699,7 +1787,8 @@ def compute_cell_prach_info(row, technology='LTE'):
             cell_range_from_ncs(p['ncs'], p['nzc'], p['tseq_us']), 2),
         'cell_range_format_km': fmt_km,
         'preambles_per_root': p['preambles_per_root'],
-        'roots_needed': p['roots_needed']}
+        'roots_needed': p['roots_needed'],
+        'cell_range_exceeded': p['cell_range_exceeded']}
 
 # ============================================================
 # Neighbor Discovery
