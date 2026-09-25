@@ -3504,6 +3504,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
     working_pci = dict(pci_map)
     working_rsi = dict(rsi_map)
     _rsi_from_leader = set()   # new cells whose RSI came from a co-sector new cell
+    _processed_new = set()     # new cells already given a PCI in this run
 
     for _, new_row in new_cells_df.iterrows():
         cid = str(new_row['cell_id'])
@@ -3562,9 +3563,44 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
             (False, False, False, False, False, False),   # last resort: drop cs_m3
         ]
 
+        def _level(cm3, cm4, cm6, cm30, confuse):
+            all_mod = cm3 and confuse
+            all_mod = (all_mod and cm4) if technology == 'NR' else (all_mod and cm6 and cm30)
+            return ('Tam uyumlu' if all_mod
+                    else 'ModN gevşetildi' if confuse else 'Collision-only')
+
+        # A new carrier joining an EXISTING sector takes the sector's PCI when
+        # that PCI is collision- and confusion-free on the new carrier: the
+        # planning convention is one PCI per sector.  v3 always searched a
+        # fresh PCI — on the real Samsun network 40 of 40 such cells got a
+        # PCI different from their sector, which the tool then reports as a
+        # co-sector inconsistency.
+        _sec_members = [str(c) for c in sector_groups.get(my_sector, [])
+                        if str(c) != cid] if my_sector else []
+        _sec_existing = [c for c in _sec_members if c not in new_ids]
+        # Existing cells plus new cells of this sector already processed
+        _sec_known = [c for c in _sec_members if c not in new_ids or c in _processed_new]
+        _sec_pcis = {working_pci.get(c) for c in _sec_known
+                     if working_pci.get(c) is not None}
+        sector_pci = next(iter(_sec_pcis)) if len(_sec_pcis) == 1 else None
+
         found_pci = None
         pci_level = ''
-        for _cm3, _cm4, _cm6, _cm30, _confuse, _cs_m3 in pci_configs:
+        if sector_pci is not None:
+            for _cm3, _cm4, _cm6, _cm30, _confuse, _cs_m3 in pci_configs:
+                if not _confuse:
+                    break           # never accept a confusion for convention's sake
+                if _pci_is_clean_ex(sector_pci, cid, neighbors, working_pci,
+                                    _cm3, _cm6, _cm30, _confuse,
+                                    cell_to_sector=cell_to_sector,
+                                    co_site_set=co_site_set,
+                                    check_mod4=_cm4,
+                                    enforce_co_site_mod3=_cs_m3,
+                                    carrier_map=carrier_map):
+                    found_pci = sector_pci
+                    pci_level = 'Sektör PCI · ' + _level(_cm3, _cm4, _cm6, _cm30, _confuse)
+                    break
+        for _cm3, _cm4, _cm6, _cm30, _confuse, _cs_m3 in (pci_configs if found_pci is None else ()):
             for mod3_class in preferred_mod3 + [m for m in [0, 1, 2] if m not in preferred_mod3]:
                 candidates = list(range(mod3_class, max_pci, 3))
                 not_used = [p for p in candidates if p not in used_pcis]
@@ -3575,7 +3611,8 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                                         cell_to_sector=cell_to_sector,
                                         co_site_set=co_site_set,
                                         check_mod4=_cm4,
-                                        enforce_co_site_mod3=_cs_m3):
+                                        enforce_co_site_mod3=_cs_m3,
+                                        carrier_map=carrier_map):
                         found_pci = pci_cand
                         # Determine quality level
                         all_mod = _cm3 and _confuse
@@ -3602,10 +3639,22 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         rsi_group = [c for c in _same_lra_group(cid, sector_groups, cell_to_sector, nzc_map)
                      if c == cid or c in new_ids]
         found_rsi = None
+        rsi_from_sector = False
+        # Existing same-L_RA cells of the sector agree on one RSI?  Then that
+        # is the sector's RSI and the new carrier takes it if it is clean there.
+        _sec_rsis = {working_rsi.get(c) for c in _sec_existing
+                     if working_rsi.get(c) is not None
+                     and nzc_map.get(c, NZC_LONG) == cell_nzc}
+        sector_rsi = next(iter(_sec_rsis)) if len(_sec_rsis) == 1 else None
         if cid in _rsi_from_leader:
             # Already given by an earlier new cell of the same sector, and
             # checked clean for this cell then.
             found_rsi = working_rsi.get(cid)
+        elif sector_rsi is not None and _rsi_is_clean_for_group(
+                int(sector_rsi), rsi_group, neighbors, working_rsi, ncs_map,
+                technology, cell_to_sector, nzc_map, carrier_map, restricted_map):
+            found_rsi = int(sector_rsi)
+            rsi_from_sector = True
         else:
             for rsi_cand in range(0, root_space_size(cell_nzc)):
                 if _rsi_is_clean_for_group(rsi_cand, rsi_group, neighbors,
@@ -3638,19 +3687,18 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                 1 for _n in nbs if same_carrier(carrier_map, cid, _n)),
             'pci_quality': pci_level if found_pci is not None else 'Bulunamadı',
             'reason': (f"PCI={found_pci} (mod3={found_pci%3}) [{pci_level}], RSI={found_rsi}"
+                       + (" [Sektör RSI]" if rsi_from_sector else "")
                        if found_pci is not None
                        else 'Uygun PCI/RSI bulunamadı')
         })
 
         # Propagate to working maps for next new cell
         if found_pci is not None:
+            # Only this cell: existing co-sector cells keep their PCI, and a
+            # later new cell of the same sector picks this one up as the
+            # sector PCI (_sec_known) and checks it on its own carrier.
             working_pci[cid] = found_pci
-            # Propagate same PCI to co-sector cells (they share PCI by design)
-            sec_key = cell_to_sector.get(cid)
-            if sec_key:
-                for co_cell in sector_groups.get(sec_key, []):
-                    if co_cell != cid:
-                        working_pci[co_cell] = found_pci
+        _processed_new.add(cid)
         if found_rsi is not None:
             working_rsi[cid] = found_rsi
             # Same RSI for the new same-L_RA co-sector cells (checked clean above)

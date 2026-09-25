@@ -475,6 +475,34 @@ check(len(_after) <= len(_before),
       f"cok tasiyicili sektor: cakisma azaldi ({len(_before)} -> {len(_after)})")
 
 # ============================================================
+print("\n=== 14. Yeni hucre mevcut sektore katilinca sektorun PCI/RSI'ini almali ===")
+# Samsun'da eskiden 40/40 yeni tasiyici hucre sektorunden farkli PCI ve RSI aliyordu.
+_b = dict(prach_config_index=3, zero_correlation_zone=8)
+_ex = pd.DataFrame([
+    {**_b, 'cell_id': 'S1A', 'site_id': 'S1', 'latitude': 41.0, 'longitude': 36.0, 'azimuth': 0, 'pci': 30, 'rsi': 100, 'earfcn': 1850},
+    {**_b, 'cell_id': 'S1B', 'site_id': 'S1', 'latitude': 41.0, 'longitude': 36.0, 'azimuth': 0, 'pci': 30, 'rsi': 100, 'earfcn': 3000},
+    {**_b, 'cell_id': 'S2A', 'site_id': 'S2', 'latitude': 41.01, 'longitude': 36.0, 'azimuth': 180, 'pci': 31, 'rsi': 200, 'earfcn': 1850},
+    {**_b, 'cell_id': 'S2C', 'site_id': 'S2', 'latitude': 41.01, 'longitude': 36.0, 'azimuth': 180, 'pci': 31, 'rsi': 200, 'earfcn': 5000},
+])
+_nw = pd.DataFrame([{**_b, 'cell_id': 'S1C', 'site_id': 'S1', 'latitude': 41.0, 'longitude': 36.0,
+                     'azimuth': 0, 'pci': 0, 'rsi': 0, 'earfcn': 5000}])
+_o = E.find_optimal_pci_rsi_for_new_cells(_ex, _nw, 5.0, technology='LTE').iloc[0]
+check(str(_o['suggested_pci']) == '30', f"sektor PCI'i temizse onerilir (oneri {_o['suggested_pci']})")
+check(str(_o['suggested_rsi']) == '100', f"sektor RSI'i temizse onerilir (oneri {_o['suggested_rsi']})")
+# Ayni tasiyicida (5000) komsu S2C sektorun PCI ve RSI'ini kullaniyorsa kabul edilmemeli
+_ex2 = _ex.copy()
+_ex2.loc[_ex2.cell_id == 'S2C', ['pci', 'rsi']] = [30, 100]
+_o = E.find_optimal_pci_rsi_for_new_cells(_ex2, _nw, 5.0, technology='LTE').iloc[0]
+check(str(_o['suggested_pci']) != '30', f"sektor PCI'i yeni tasiyicida cakisiyorsa onerilmez ({_o['suggested_pci']})")
+check(str(_o['suggested_rsi']) != '100', f"sektor RSI'i yeni tasiyicida cakisiyorsa onerilmez ({_o['suggested_rsi']})")
+# Mevcut hucrelerin PCI'i baska bir tasiyicida ayni olsa bile (tasiyici kapsami, K-1) engel degil
+_ex3 = _ex.copy()
+_ex3.loc[_ex3.cell_id == 'S2A', 'pci'] = 30          # 1850'de, yeni hucre 5000'de
+_o = E.find_optimal_pci_rsi_for_new_cells(_ex3, _nw, 5.0, technology='LTE').iloc[0]
+check(str(_o['suggested_pci']) == '30',
+      f"baska tasiyicidaki ayni PCI yeni hucreyi engellemez (oneri {_o['suggested_pci']})")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")
