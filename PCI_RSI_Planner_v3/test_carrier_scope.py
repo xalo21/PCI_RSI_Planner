@@ -503,6 +503,58 @@ check(str(_o['suggested_pci']) == '30',
       f"baska tasiyicidaki ayni PCI yeni hucreyi engellemez (oneri {_o['suggested_pci']})")
 
 # ============================================================
+print("\n=== 15. RSI stratejisi: en uzak yeniden kullanim (O-2) ===")
+# 40 saha x 3 sektor, tek tasiyici, zcz 12 -> 10 kok: 1200 kok > 838, yeniden
+# kullanim zorunlu.  Iki strateji de cakismasiz olmali; max_reuse'un en yakin
+# yeniden kullanimi first_fit'inkinden kotu olmamali.
+_g = pd.DataFrame([{'cell_id': f'G{s:02d}{k}', 'site_id': f'G{s:02d}',
+                    'latitude': 41.0 + (s // 8) * 0.03, 'longitude': 36.0 + (s % 8) * 0.03,
+                    'azimuth': k * 120, 'pci': (s * 3 + k) % 504, 'rsi': 0,
+                    'prach_config_index': 3, 'zero_correlation_zone': 12, 'earfcn': 1850}
+                   for s in range(40) for k in range(3)])
+_sg, _c2s, _nb, _cm = _ctx(_g, 'LTE')
+_mins = {}
+for _st in ('first_fit', 'max_reuse'):
+    _pl = E.plan_rsi_network(_g, _nb, technology='LTE', sector_groups=_sg,
+                             cell_to_sector=_c2s, carrier_map=_cm, rsi_strategy=_st)
+    _coll = E.detect_rsi_collisions(_apply(_g, _pl, 'planned_rsi'), _nb, technology='LTE',
+                                    cell_to_sector=_c2s, carrier_map=_cm)
+    check(len(_coll) == 0, f"{_st}: plan cakismasiz ({len(_coll)})")
+    check('reuse_km' in _pl.columns and 'reuse_with' in _pl.columns,
+          f"{_st}: plan ciktisinda reuse_km / reuse_with var")
+    _mins[_st] = pd.to_numeric(_pl['reuse_km'], errors='coerce').min()
+print(f"       en yakin yeniden kullanim: first_fit {_mins['first_fit']:.2f} km, "
+      f"max_reuse {_mins['max_reuse']:.2f} km")
+check(_mins['max_reuse'] >= _mins['first_fit'],
+      "max_reuse'un en yakin yeniden kullanimi first_fit'ten kotu degil")
+try:
+    E.plan_rsi_network(_g, _nb, technology='LTE', rsi_strategy='rastgele')
+    check(False, "gecersiz strateji reddedilmeli")
+except ValueError:
+    check(True, "gecersiz strateji ValueError verir")
+
+# ============================================================
+print("\n=== 16. Ncs yeterlilik (O-1) ===")
+_b = dict(prach_config_index=3, earfcn=1850, pci=0, rsi=0, azimuth=0)
+_nd = pd.DataFrame([
+    {**_b, 'cell_id': 'OV1', 'latitude': 41.000, 'longitude': 36.0, 'zero_correlation_zone': 12},
+    {**_b, 'cell_id': 'OV2', 'latitude': 41.018, 'longitude': 36.0, 'zero_correlation_zone': 12},  # ~2 km
+    {**_b, 'cell_id': 'UN1', 'latitude': 40.000, 'longitude': 36.0, 'zero_correlation_zone': 5},
+    {**_b, 'cell_id': 'UN2', 'latitude': 40.360, 'longitude': 36.0, 'zero_correlation_zone': 5},   # ~40 km
+    {**_b, 'cell_id': 'NOHO', 'latitude': 39.0, 'longitude': 36.0, 'zero_correlation_zone': 5},
+])
+_ad = E.ncs_adequacy(_nd, {('OV1', 'OV2'): 500, ('UN1', 'UN2'): 800}, 'LTE').set_index('cell_id')
+check(_ad.loc['OV1', 'status'] == 'AŞIRI', f"2 km HO, Ncs 119 (15.95 km) -> AŞIRI ({_ad.loc['OV1', 'status']})")
+# ~2.0 km'yi karsilayan en kucuk: Ncs 22 (2.08 km) -> zcz 4
+check(int(_ad.loc['OV1', 'suggested_zcz']) == 4 and int(_ad.loc['OV1', 'suggested_ncs']) == 22,
+      f"onerilen zcz D'nin tamamini karsilayan en kucuk ({_ad.loc['OV1', 'suggested_zcz']}/"
+      f"{_ad.loc['OV1', 'suggested_ncs']})")
+check(float(_ad.loc['OV1', 'suggested_range_km']) >= float(_ad.loc['OV1', 'd90_km']),
+      "onerilen menzil D90'i karsilar")
+check(_ad.loc['UN1', 'status'] == 'YETERSİZ', f"40 km HO, Ncs 26 (2.65 km) -> YETERSİZ ({_ad.loc['UN1', 'status']})")
+check(_ad.loc['NOHO', 'status'] == 'HO verisi yok', "HO verisi olmayan hucre isaretlenir")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")

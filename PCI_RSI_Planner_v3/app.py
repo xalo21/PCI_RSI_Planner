@@ -26,7 +26,7 @@ from pci_engine import (
     get_ncs, get_lte_preamble_format, cell_range_from_ncs,
     cell_range_from_format, preambles_per_root, roots_needed,
     rsi_overlap, derive_zcz_from_cell_range,
-    plan_rsi_network, plan_pci_network,
+    plan_rsi_network, plan_pci_network, rsi_reuse_distances, ncs_adequacy,
     find_optimal_pci_rsi_for_new_cells,
     suggest_pci, suggest_rsi, rescan_pci_rsi_for_cells,
     parse_band_info, enrich_band_columns, detect_sector_groups,
@@ -964,6 +964,17 @@ with tab2:
                 sa_reserved_start = None
                 sa_reserved_end = None
 
+        _rsi_strat_label = st.radio(
+            "RSI atama stratejisi",
+            ["En uzak yeniden kullanım (önerilen)", "İlk uygun RSI"],
+            horizontal=True, key='rsi_strategy_choice',
+            help="İki strateji de çakışmasız plan üretir. **En uzak yeniden kullanım**: "
+                 "temiz adaylar arasından, aynı kökü kullanan en yakın hücresi en uzakta "
+                 "olanı seçer; kök havuzunun tamamı kullanılmadan hiçbir kök tekrar "
+                 "kullanılmaz. **İlk uygun**: en küçük temiz RSI'ı seçer (önceki davranış) — "
+                 "kökleri düşük indekslere toplar ve daha yakında yeniden kullanır.")
+        rsi_strategy = 'first_fit' if _rsi_strat_label.startswith('İlk') else 'max_reuse'
+
         pc1, pc2 = st.columns(2)
         with pc1:
             if st.button("📡 Tüm Ağ İçin PCI Planla (SA)", type="primary", use_container_width=True):
@@ -1010,7 +1021,8 @@ with tab2:
                                                    st.session_state.cell_to_sector,
                                                    progress_callback=_rsi_progress,
                                                    carrier_map=_results.get('carrier_map'),
-                                                   planning_scope=planning_scope)
+                                                   planning_scope=planning_scope,
+                                                   rsi_strategy=rsi_strategy)
                     st.session_state.rsi_plan = rsi_plan
                     # Invalidate plan caches
                     st.session_state._plan_cache_key = None
@@ -1169,6 +1181,33 @@ with tab2:
 - ✅ Değişen: **{len(rsi_plan[rsi_plan['changed']=='✅ Değişti'])}**
 - — Aynı kalan: **{len(rsi_plan[rsi_plan['changed']=='— Aynı'])}**
 - ❌ Atanamayan: **{len(rsi_plan[rsi_plan['planned_rsi']=='—'])}**""")
+
+            # Nearest reuse distance, current RSI vs plan (Ö-2)
+            if 'reuse_km' in rsi_plan.columns:
+                try:
+                    _res_r = st.session_state.results or {}
+                    _cur_reuse = rsi_reuse_distances(
+                        st.session_state.df, None, _res_r.get('summary', {}).get('technology', tech),
+                        _res_r.get('carrier_map'), st.session_state.cell_to_sector)
+                    _cur_v = np.array([v[0] for v in _cur_reuse.values()])
+                    _cur_v = _cur_v[np.isfinite(_cur_v)]
+                    _pl_v = pd.to_numeric(rsi_plan['reuse_km'], errors='coerce').dropna().to_numpy()
+
+                    def _q(a, p):
+                        return f"{np.percentile(a, p):.2f}" if len(a) else '—'
+                    st.markdown("#### 📏 RSI yeniden kullanım mesafesi")
+                    st.caption("Her hücre için: aynı taşıyıcıda, köklerinden en az birini kullanan "
+                               "en yakın hücreye olan mesafe (km). Büyük = daha iyi.")
+                    st.dataframe(pd.DataFrame({
+                        '': ['Mevcut RSI', 'Plan'],
+                        'En yakın (km)': [f"{_cur_v.min():.2f}" if len(_cur_v) else '—',
+                                          f"{_pl_v.min():.2f}" if len(_pl_v) else '—'],
+                        'P5 (km)': [_q(_cur_v, 5), _q(_pl_v, 5)],
+                        'P25 (km)': [_q(_cur_v, 25), _q(_pl_v, 25)],
+                        'Medyan (km)': [_q(_cur_v, 50), _q(_pl_v, 50)],
+                    }), use_container_width=True, hide_index=True)
+                except Exception as _e:
+                    st.caption(f"Yeniden kullanım mesafesi hesaplanamadı: {_e}")
 
             st.dataframe(rsi_plan, use_container_width=True, height=450)
 
@@ -1767,7 +1806,8 @@ with tab4:
             "🟤 Mod 4 Conflict (NR SSB DMRS)",
             "🔵 Mod 6 Conflict","⚪ Mod 30 Conflict",
             "🏠 Co-site Collision & Mod3/Mod4",
-            "🟣 RSI Collision (Cell-Range)","📡 PRACH / Cell Range Bilgileri","🔗 Komşuluk Tablosu"])
+            "🟣 RSI Collision (Cell-Range)","📡 PRACH / Cell Range Bilgileri",
+            "📐 Ncs Yeterlilik (HO mesafesi)","🔗 Komşuluk Tablosu"])
         st.markdown("---")
 
         # Helper: filter to only co-site pairs (same site, DIFFERENT sector)
@@ -1936,6 +1976,67 @@ with tab4:
                      'Max Range (km)': round(cell_range_from_format(k), 2)}
                     for k,v in sorted(LTE_PREAMBLE_FORMATS.items())])
                 st.table(fref)
+
+        elif "Ncs Yeterlilik" in rtype:
+            st.markdown("### 📐 Ncs Yeterlilik — HO mesafesine göre")
+            st.markdown(
+                "Her hücrenin Ncs'inin desteklediği menzil, hücrenin **gerçek handover "
+                "komşularına olan mesafeyle** karşılaştırılır. `D` = HO denemesiyle "
+                "ağırlıklı, seçilen yüzdelikteki komşu mesafesi. Hücrenin o yöndeki sınırı "
+                "`D/2` (eşit hücreler) ile `D` (hücre komşusuna kadar taşıyor) arasındadır:\n\n"
+                "- **YETERSİZ** — Ncs menzili `D/2`'den bile küçük: uzak kenardaki preamble'lar "
+                "komşu cyclic shift'e kayar (RACH başarısızlığı riski).\n"
+                "- **AŞIRI** — Ncs menzili `2·D`'den büyük ve `D`'nin tamamını karşılayan daha küçük "
+                "bir zcz var: Ncs gereğinden büyük, kök dizisi israf ediliyor. Önerilen zcz "
+                "`D`'nin **tamamını** karşılayan en küçük değerdir (ihtiyatlı uç).\n"
+                "- **UYGUN** — arada.")
+            _na = (results or {}).get('neighbor_attempts') or {}
+            if not any(float(v or 0) > 0 for v in _na.values()):
+                st.info("📌 Bu rapor HO deneme sayılarını kullanır. Kenar çubuğundan "
+                        "**Harici Komşuluk Listesi**'ni (deneme sütunlu) yükleyip analizi "
+                        "yeniden çalıştırın.")
+            else:
+                _pct = st.slider("Mesafe yüzdeliği (HO denemesiyle ağırlıklı)", 50, 99, 90, 1,
+                                 key='ncs_adequacy_pct',
+                                 help="90 = HO denemelerinin %90'ı bu mesafe içindeki "
+                                      "komşularla yapılıyor.")
+                try:
+                    _ad = ncs_adequacy(st.session_state.df, _na, tech,
+                                       results.get('carrier_map'), percentile=_pct)
+                except Exception as _e:
+                    _ad = None
+                    st.error(f"Ncs yeterlilik hesaplanamadı: {_e}")
+                if _ad is not None and len(_ad):
+                    _cnt = _ad['status'].value_counts()
+                    _c1, _c2, _c3, _c4 = st.columns(4)
+                    _c1.metric("🔴 Yetersiz", int(_cnt.get('YETERSİZ', 0)))
+                    _c2.metric("🟠 Aşırı", int(_cnt.get('AŞIRI', 0)))
+                    _c3.metric("🟢 Uygun", int(_cnt.get('UYGUN', 0)))
+                    _c4.metric("⚪ HO verisi yok", int(_cnt.get('HO verisi yok', 0)))
+                    _ov = _ad[_ad['status'] == 'AŞIRI']
+                    if len(_ov):
+                        _now_all = int(pd.to_numeric(_ad['roots_now'], errors='coerce').sum())
+                        _save = int(pd.to_numeric(_ov['roots_now'], errors='coerce').sum()
+                                    - pd.to_numeric(_ov['roots_suggested'], errors='coerce').sum())
+                        st.success(
+                            f"🟠 **{len(_ov)} hücrede** Ncs gereğinden büyük. Önerilen zcz "
+                            f"değerleriyle ağın toplam kök ihtiyacı **{_now_all} → "
+                            f"{_now_all - _save}** olur. Daha az kök = RSI'ların daha uzakta "
+                            f"yeniden kullanılması. Öneri otomatik uygulanmaz; veride "
+                            f"`zero_correlation_zone`'u (Huawei'de cellRadius'u) güncelleyip "
+                            f"planı yeniden koşun.")
+                    if int(_cnt.get('YETERSİZ', 0)):
+                        st.warning(
+                            "🔴 **Yetersiz** bulgularında `ho_partners` ve `farthest_ho_attempts` "
+                            "sütunlarına bakın: tek bir uzak ilişkiden gelen bulgu koordinat ya da "
+                            "komşuluk hatası olabilir; çok sayıda ve yoğun ilişki ise hücrenin "
+                            "gerçekten uzağa taştığını gösterir (ör. deniz üzeri yayılım).")
+                    st.dataframe(_ad, use_container_width=True, height=450)
+                    st.download_button(
+                        "⬇️ Ncs yeterlilik raporunu indir (CSV)",
+                        data=_ad.to_csv(index=False).encode('utf-8-sig'),
+                        file_name="ncs_yeterlilik.csv", mime="text/csv",
+                        key='dl_ncs_adequacy')
 
         elif "Komşuluk" in rtype:
             st.markdown("### 🔗 Komşuluk Tablosu")
@@ -3321,10 +3422,17 @@ Tüm ağ için sıfırdan RSI atar — **Greedy Interval Graph Coloring**:
 3. Her hücre (sektör grubu) için:
    a. Grubun tüm hücrelerinin 1. ve 2. halka komşularının — aynı L_RA'lı
       olanların — kullandığı root indekslerini topla
-   b. RSI=0'dan kök alanının sonuna kadar tara
-   c. [RSI, RSI + roots_needed) aralığı, gruptaki her hücre için
-      hiçbir occupied root ile örtüşmüyorsa → gruba ATA
+   b. Kök alanındaki her başlangıç için [RSI, RSI + roots_needed)
+      aralığının gruptaki her hücre için temiz olup olmadığını bul
+   c. Temiz adaylardan birini seç (RSI atama stratejisi):
+      ─ En uzak yeniden kullanım (varsayılan): aynı kökü kullanan en
+        yakın hücresi EN UZAKTA olan aday; hiç kullanılmayan kökler
+        sonsuz uzak sayılır → havuzun tamamı dolmadan kök tekrar edilmez
+      ─ İlk uygun: en küçük temiz RSI (eski davranış)
    d. Çalışan haritayı güncelle
+
+Plan çıktısındaki reuse_km / reuse_with sütunları, her hücrenin köklerini
+aynı taşıyıcıda kullanan en yakın hücreyi ve mesafesini gösterir.
 
 Öneriler, Tarama ve Yeni Hücre sekmeleri aynı kuralları kullanır: aday RSI,
 kopyalanacağı her ortak sektör hücresinin kendi taşıyıcısında da temiz olmalıdır.

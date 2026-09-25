@@ -1614,6 +1614,188 @@ def cell_root_set(start, ncs, nzc=NZC_LONG, restricted=False, candidate=False):
         return None
     return {(int(start) + i) % mx for i in range(rn)}
 
+
+NCS_ADEQUACY_LOW = 0.5    # supported < 0.5 x D_p  -> YETERSİZ
+NCS_ADEQUACY_HIGH = 2.0   # supported > 2.0 x D_p  -> AŞIRI (if a smaller zcz covers D_p)
+
+
+def ncs_adequacy(df, nbr_attempts, technology='LTE', carrier_map=None,
+                 percentile=90, low=NCS_ADEQUACY_LOW, high=NCS_ADEQUACY_HIGH):
+    """Does each cell's Ncs cover the distance it actually serves?  (Ö-1)
+
+    The serving distance is estimated from real handovers: D_p = the
+    attempts-weighted p-th percentile of the distances to the cell's
+    handover partners (same-site pairs, < 50 m, ignored).  A UE handing over
+    from A to B is somewhere between A and B, so A's edge towards B lies
+    between D/2 (equal cells) and D (A overshoots up to B).  The two flags
+    use the ends of that band, so neither needs a guessed factor:
+
+      YETERSİZ  supported range < low  x D_p — even the optimistic edge
+                estimate is out of the Ncs window: preambles from the far
+                edge alias into a neighbouring cyclic shift (RACH failures).
+      AŞIRI     supported range > high x D_p, and a smaller zcz still covers
+                the WHOLE D_p — Ncs is oversized and wastes root sequences.
+                The suggested zcz is the smallest that covers D_p, i.e. the
+                conservative end of the band.
+      UYGUN     otherwise.
+      HO verisi yok  no handover partner with attempts > 0.
+
+    Returns a DataFrame, one row per cell.
+    """
+    technology = norm_tech(technology)
+    carrier_map = carrier_map or build_carrier_map(df)
+    ids = df['cell_id'].astype(str).tolist()
+    lat = dict(zip(ids, pd.to_numeric(df['latitude'], errors='coerce')))
+    lon = dict(zip(ids, pd.to_numeric(df['longitude'], errors='coerce')))
+
+    partners = defaultdict(list)          # cell -> [(km, attempts, other)]
+    for pair, w in (nbr_attempts or {}).items():
+        try:
+            a, b = (str(x) for x in pair)
+            w = float(w)
+        except (TypeError, ValueError):
+            continue
+        if not w or w <= 0 or a not in lat or b not in lat:
+            continue
+        if pd.isna(lat[a]) or pd.isna(lat[b]):
+            continue
+        d = haversine_distance(lat[a], lon[a], lat[b], lon[b])
+        if d < 0.05:
+            continue
+        partners[a].append((d, w, b))
+        partners[b].append((d, w, a))
+
+    def _wpct(items, p):
+        items = sorted(items)
+        cum = np.cumsum([w for _, w, _ in items])
+        k = int(np.searchsorted(cum, p / 100.0 * cum[-1]))
+        return items[min(k, len(items) - 1)][0]
+
+    rows = []
+    for cid, (_, row) in zip(ids, df.iterrows()):
+        rsi_v = row.get('rsi')
+        rsi_v = int(rsi_v) if rsi_v is not None and not pd.isna(rsi_v) else None
+        p = _prach_params(row, technology, rsi=rsi_v)
+        ncs, nzc, tseq = p['ncs'], p['nzc'], p['tseq_us']
+        supported = cell_range_from_ncs(ncs, nzc, tseq)
+        roots_now = p['roots_needed']
+        rec = {'cell_id': cid, 'carrier': carrier_map.get(cid, CARRIER_UNKNOWN),
+               'zcz': p['zcz'], 'ncs': ncs, 'ncs_range_km': round(supported, 2),
+               'roots_now': roots_now}
+        cr = row.get('cell_range')
+        if cr is not None and not pd.isna(cr):
+            rec['cell_range_input_m'] = int(cr)
+        items = partners.get(cid, [])
+        if not items:
+            rec.update(status='HO verisi yok', ho_partners=0)
+            rows.append(rec)
+            continue
+        dp = _wpct(items, percentile)
+        far = max(items)
+        rec.update(ho_partners=len(items),
+                   ho_attempts=int(sum(w for _, w, _ in items)),
+                   d50_km=round(_wpct(items, 50), 2),
+                   **{f'd{percentile}_km': round(dp, 2)},
+                   farthest_ho_km=round(far[0], 2), farthest_ho_cell=far[2],
+                   farthest_ho_attempts=int(far[1]))
+        status = 'UYGUN'
+        if supported < low * dp:
+            status = 'YETERSİZ'
+        elif supported > high * dp:
+            table = ncs_table(technology, p['restricted'], p['is_short'], p['delta_f_ra_khz'])
+            for z, v in sorted(table.items(), key=lambda kv: kv[1]):
+                if v and cell_range_from_ncs(v, nzc, tseq) >= dp - 1e-9:
+                    if v < ncs:
+                        rn = cell_root_count(rsi_v or 0, v, nzc, p['restricted'])
+                        status = 'AŞIRI'
+                        rec.update(suggested_zcz=z, suggested_ncs=v,
+                                   suggested_range_km=round(cell_range_from_ncs(v, nzc, tseq), 2),
+                                   roots_suggested=rn)
+                    break
+        rec['status'] = status
+        rows.append(rec)
+    out = pd.DataFrame(rows)
+    if len(out):
+        order = {'YETERSİZ': 0, 'AŞIRI': 1, 'UYGUN': 2, 'HO verisi yok': 3}
+        out = out.sort_values('status', key=lambda s: s.map(order), kind='stable')
+        out = out.reset_index(drop=True)
+        for c in ('suggested_zcz', 'suggested_ncs', 'roots_suggested', 'ho_partners',
+                  'ho_attempts', 'farthest_ho_attempts', 'cell_range_input_m'):
+            if c in out.columns:
+                out[c] = pd.to_numeric(out[c], errors='coerce').astype('Int64')
+        lead = ['cell_id', 'status', 'carrier', 'zcz', 'ncs', 'ncs_range_km']
+        out = out[[c for c in lead if c in out.columns]
+                  + [c for c in out.columns if c not in lead]]
+    return out
+
+
+def _haversine_vec(lat0, lon0, lats, lons):
+    """Great-circle distance (km) from one point to many, vectorised."""
+    la0, lo0 = np.radians(lat0), np.radians(lon0)
+    la, lo = np.radians(np.asarray(lats, float)), np.radians(np.asarray(lons, float))
+    a = (np.sin((la - la0) / 2) ** 2
+         + np.cos(la0) * np.cos(la) * np.sin((lo - lo0) / 2) ** 2)
+    return EARTH_RADIUS_KM * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+
+
+def rsi_reuse_distances(df, rsi_map=None, technology='LTE', carrier_map=None,
+                        cell_to_sector=None):
+    """RSI reuse distance of every cell.
+
+    For each cell: the distance (km) to the nearest OTHER cell on the same
+    carrier and the same L_RA that occupies at least one of its root
+    sequences, and that cell's id.  Co-sector cells are skipped (they share
+    the RSI by design and sit on other carriers).  A cell whose roots nobody
+    else uses gets inf.  A neighbour pair that collides shows up here as a
+    small distance, so this is the one number that makes an RSI plan
+    reviewable: how close does the nearest reuse come.
+
+    rsi_map: cell -> RSI to evaluate (default: the 'rsi' column).
+    Returns {cell_id: (km, partner_id or None)}.
+    """
+    technology = norm_tech(technology)
+    carrier_map = carrier_map or build_carrier_map(df)
+    cell_to_sector = cell_to_sector or {}
+    ids = df['cell_id'].astype(str).tolist()
+    if rsi_map is None:
+        rsi_map = dict(zip(ids, df['rsi'])) if 'rsi' in df.columns else {}
+    lat = dict(zip(ids, pd.to_numeric(df['latitude'], errors='coerce')))
+    lon = dict(zip(ids, pd.to_numeric(df['longitude'], errors='coerce')))
+
+    roots, space = {}, {}
+    for cid, (_, row) in zip(ids, df.iterrows()):
+        v = rsi_map.get(cid)
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        p = _prach_params(row, technology, rsi=v)
+        s = cell_root_set(v, p['ncs'], p['nzc'], p['restricted'])
+        if s:
+            roots[cid] = s
+            space[cid] = (carrier_map.get(cid, CARRIER_UNKNOWN), p['nzc'])
+
+    by_root = defaultdict(list)          # (carrier, nzc, root) -> cells
+    for cid, s in roots.items():
+        for r in s:
+            by_root[space[cid] + (r,)].append(cid)
+
+    out = {}
+    for cid, s in roots.items():
+        sec = cell_to_sector.get(cid)
+        partners = {x for r in s for x in by_root[space[cid] + (r,)]
+                    if x != cid and (sec is None or cell_to_sector.get(x) != sec)}
+        partners = [x for x in partners
+                    if pd.notna(lat.get(x)) and pd.notna(lon.get(x))]
+        if not partners or pd.isna(lat.get(cid)) or pd.isna(lon.get(cid)):
+            out[cid] = (float('inf'), None)
+            continue
+        d = _haversine_vec(lat[cid], lon[cid], [lat[x] for x in partners],
+                           [lon[x] for x in partners])
+        i = int(np.argmin(d))
+        out[cid] = (float(d[i]), partners[i])
+    return out
+
 # ============================================================
 # Huawei cellRange → zcz Reverse Mapping
 # ============================================================
@@ -2935,6 +3117,109 @@ def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
     return True
 
 
+def _clean_rsi_starts(group, neighbors, rsi_map, ncs_map, nzc_map, carrier_map,
+                      cell_to_sector, restricted_map, technology='LTE', exclude=None):
+    """Every start that _rsi_is_clean_for_group() would accept, in one pass.
+
+    Same rules, computed as a forbidden-start set instead of one full
+    neighbour scan per candidate, so the whole root space can be offered to
+    the reuse-distance choice.  Restricted groups fall back to the exact
+    per-candidate check (their root count depends on the start).
+    """
+    nz = nzc_map.get(str(group[0]), NZC_LONG)
+    mx = root_space_size(nz)
+    if any(restricted_map.get(str(m), False) for m in group):
+        return [c for c in range(mx) if c != exclude and _rsi_is_clean_for_group(
+            c, group, neighbors, rsi_map, ncs_map, technology, cell_to_sector,
+            nzc_map, carrier_map, restricted_map)]
+    forbidden = set()
+    for m in group:
+        m = str(m)
+        rn_m = cell_root_count(0, ncs_map.get(m, 13), nz, False)
+        if rn_m is None or rn_m > mx:
+            return []
+        sec = cell_to_sector.get(m)
+        for nb in neighbors.get(m, set()):
+            if sec is not None and cell_to_sector.get(str(nb)) == sec:
+                continue
+            if not same_carrier(carrier_map, m, nb):
+                continue
+            v = rsi_map.get(nb)
+            if v is None or pd.isna(v):
+                continue
+            nb_nz = nzc_map.get(str(nb), NZC_LONG)
+            if nb_nz != nz:
+                continue
+            theirs = cell_root_set(int(v), ncs_map.get(nb, 13), nb_nz,
+                                   restricted_map.get(str(nb), False))
+            for r in theirs or ():
+                for k in range(rn_m):
+                    forbidden.add((r - k) % mx)
+    return [c for c in range(mx) if c not in forbidden and c != exclude]
+
+
+class _ReuseChooser:
+    """Pick, among clean starts, the one whose nearest reuse is farthest away
+    — the suggestion / rescan / new-cell counterpart of the planner's
+    'max_reuse' strategy, evaluated against a working RSI map."""
+
+    def __init__(self, df, ncs_map, nzc_map, restricted_map, carrier_map,
+                 cell_to_sector, strategy='max_reuse'):
+        ids = df['cell_id'].astype(str).tolist()
+        self.lat = dict(zip(ids, pd.to_numeric(df['latitude'], errors='coerce')))
+        self.lon = dict(zip(ids, pd.to_numeric(df['longitude'], errors='coerce')))
+        self.ncs, self.nzc, self.rst = ncs_map, nzc_map, restricted_map
+        self.car = carrier_map or {}
+        self.c2s = cell_to_sector or {}
+        self.strategy = strategy
+        self.members = defaultdict(list)
+        for c in ids:
+            self.members[(self.car.get(c, CARRIER_UNKNOWN), nzc_map.get(c, NZC_LONG))].append(c)
+
+    def _profile(self, m, rsi_map):
+        nz = self.nzc.get(m, NZC_LONG)
+        mx = root_space_size(nz)
+        prof = np.full(mx, np.inf)
+        if pd.isna(self.lat.get(m)) or pd.isna(self.lon.get(m)):
+            return prof
+        sec = self.c2s.get(m)
+        xs, roots = [], []
+        for x in self.members[(self.car.get(m, CARRIER_UNKNOWN), nz)]:
+            if x == m or (sec is not None and self.c2s.get(x) == sec):
+                continue
+            v = rsi_map.get(x)
+            if v is None or pd.isna(v) or pd.isna(self.lat.get(x)):
+                continue
+            s = cell_root_set(int(v), self.ncs.get(x, 13), nz, self.rst.get(x, False))
+            if s:
+                xs.append(x)
+                roots.append(np.fromiter(s, int))
+        if not xs:
+            return prof
+        dist = _haversine_vec(self.lat[m], self.lon[m],
+                              [self.lat[x] for x in xs], [self.lon[x] for x in xs])
+        np.minimum.at(prof, np.concatenate(roots),
+                      np.repeat(dist, [len(r) for r in roots]))
+        return prof
+
+    def choose(self, clean, group, rsi_map):
+        if not clean:
+            return None
+        if self.strategy == 'first_fit' or len(clean) == 1:
+            return clean[0]
+        group = [str(m) for m in group]
+        vals = np.full(len(clean), np.inf)
+        for m in group:
+            prof = self._profile(m, rsi_map)
+            nz = self.nzc.get(m, NZC_LONG)
+            mx = len(prof)
+            for j, c in enumerate(clean):
+                rn = cell_root_count(c, self.ncs.get(m, 13), nz, self.rst.get(m, False))
+                if rn:
+                    vals[j] = min(vals[j], prof[(c + np.arange(rn)) % mx].min())
+        return clean[int(np.argmax(vals))]      # ties -> lowest start
+
+
 def _same_lra_group(cell_id, sector_groups, cell_to_sector, nzc_map):
     """`cell_id` plus its co-sector cells with the same L_RA — the cells that
     share one RSI.  A long and a short cell in one sector cannot share it."""
@@ -3405,7 +3690,8 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                                         check_mod30=None,
                                         sector_groups=None, cell_to_sector=None,
                                         check_mod4=False, carrier_map=None,
-                                        planning_scope='sector'):
+                                        planning_scope='sector',
+                                        rsi_strategy='max_reuse'):
     """Find optimal PCI and RSI for new cells being added to an existing network.
 
     existing_df: DataFrame of existing network cells (with pci, rsi, lat, lon, etc.)
@@ -3498,6 +3784,8 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
 
     # Build co-site set from combined network with updated sector info
     co_site_set = build_co_site_set(combined, cell_to_sector)
+    _new_chooser = _ReuseChooser(combined, ncs_map, nzc_map, restricted_map,
+                                 carrier_map, cell_to_sector, rsi_strategy)
 
     results = []
     # Working maps (so earlier new cell assignments propagate)
@@ -3656,13 +3944,10 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
             found_rsi = int(sector_rsi)
             rsi_from_sector = True
         else:
-            for rsi_cand in range(0, root_space_size(cell_nzc)):
-                if _rsi_is_clean_for_group(rsi_cand, rsi_group, neighbors,
-                                           working_rsi, ncs_map, technology,
-                                           cell_to_sector, nzc_map, carrier_map,
-                                           restricted_map):
-                    found_rsi = rsi_cand
-                    break
+            clean = _clean_rsi_starts(rsi_group, neighbors, working_rsi, ncs_map,
+                                      nzc_map, carrier_map, cell_to_sector,
+                                      restricted_map, technology)
+            found_rsi = _new_chooser.choose(clean, rsi_group, working_rsi)
 
         # Store results
         pss, sss = decompose_pci(found_pci) if found_pci is not None else ('—', '—')
@@ -3723,7 +4008,8 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                               check_mod30=None, check_mod4=False,
                               sector_groups=None, cell_to_sector=None,
                               rescan_pci=True, rescan_rsi=True,
-                              carrier_map=None, planning_scope='sector'):
+                              carrier_map=None, planning_scope='sector',
+                              rsi_strategy='max_reuse'):
     """Re-optimise PCI and/or RSI **only** for *target_cell_ids* while keeping
     the rest of the network fixed.
 
@@ -3778,6 +4064,8 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
 
     # Normalize neighbours to strings
     str_neighbors = {str(k): {str(v) for v in vs} for k, vs in neighbors.items()}
+    _rescan_chooser = _ReuseChooser(df, ncs_map, nzc_map, restricted_map, carrier_map,
+                                    cell_to_sector, rsi_strategy)
 
     # Build co-site set
     co_site_set = build_co_site_set(df, cell_to_sector)
@@ -3971,14 +4259,10 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
             # Same RSI goes to the same-L_RA co-sector cells, so it has to be
             # clean on all of their carriers; stay inside this cell's root space.
             rsi_group = _same_lra_group(cid, sector_groups, cell_to_sector, nzc_map)
-            found_rsi = None
-            for rsi_cand in range(0, root_space_size(cell_nzc)):
-                if _rsi_is_clean_for_group(rsi_cand, rsi_group, str_neighbors,
-                                           working_rsi, ncs_map, technology,
-                                           cell_to_sector, nzc_map, carrier_map,
-                                           restricted_map):
-                    found_rsi = rsi_cand
-                    break
+            clean = _clean_rsi_starts(rsi_group, str_neighbors, working_rsi, ncs_map,
+                                      nzc_map, carrier_map, cell_to_sector,
+                                      restricted_map, technology)
+            found_rsi = _rescan_chooser.choose(clean, rsi_group, working_rsi)
 
             if found_rsi is None:
                 found_rsi = saved_rsi
@@ -4020,7 +4304,8 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
 
 def suggest_rsi(df, neighbors, results, technology='LTE',
                sector_groups=None, cell_to_sector=None,
-               progress_fn=None, carrier_map=None, planning_scope='sector'):
+               progress_fn=None, carrier_map=None, planning_scope='sector',
+               rsi_strategy='max_reuse'):
     """For every cell with an RSI problem, suggest a clean replacement RSI.
 
     If sector_groups is provided, co-sector cells (same site + same azimuth)
@@ -4060,6 +4345,8 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
         ncs_map[cid] = _p['ncs']
         tseq_map[cid] = _p['tseq_us']
         restricted_map[cid] = _p['restricted']
+    chooser = _ReuseChooser(df, ncs_map, nzc_map, restricted_map, carrier_map,
+                            cell_to_sector, rsi_strategy)
 
     def _rng(start, cid):
         """'a-b' root range of `cid` from `start`, wrapped in its own root space."""
@@ -4105,15 +4392,10 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
         # space (0-137 for L=139).
         group = [c for c in _same_lra_group(cell_id, sector_groups, cell_to_sector, nzc_map)
                  if c == cell_id or c in nzc_map]
-        found = None
-        for candidate in range(0, root_space_size(cell_nzc)):
-            if candidate == cur:
-                continue
-            if _rsi_is_clean_for_group(candidate, group, neighbors, working_rsi,
-                                       ncs_map, technology, cell_to_sector,
-                                       nzc_map, carrier_map, restricted_map):
-                found = candidate
-                break
+        clean = _clean_rsi_starts(group, neighbors, working_rsi, ncs_map, nzc_map,
+                                  carrier_map, cell_to_sector, restricted_map,
+                                  technology, exclude=cur)
+        found = chooser.choose(clean, group, working_rsi)
 
         if found is not None:
             new_rn, new_range = _rng(found, cell_id)
@@ -4184,11 +4466,24 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
 # ============================================================
 # Full Network RSI Auto-Planner (Cell-Range-Aware)
 # ============================================================
+RSI_STRATEGIES = ('max_reuse', 'first_fit')
+
+
 def plan_rsi_network(df, neighbors, technology='LTE',
                      sector_groups=None, cell_to_sector=None,
                      progress_callback=None,
-                     carrier_map=None, planning_scope='sector'):
+                     carrier_map=None, planning_scope='sector',
+                     rsi_strategy='max_reuse'):
     """Assign RSI values to ALL cells from scratch using cell-range-aware planning.
+
+    rsi_strategy — which clean start a cell gets:
+      'max_reuse'  the one whose nearest reuse (same carrier, same L_RA, any
+                   shared root) is FARTHEST away; unused roots count as
+                   infinitely far, so the whole root space is used before any
+                   root is reused.  (Ö-2)
+      'first_fit'  the lowest clean start — v3 before 2026-09.  Collision-free
+                   too, but it packs cells into the low roots and reuses them
+                   as close as the constraints allow.
 
     If sector_groups is provided, co-sector cells (same site + same azimuth)
     are assigned the SAME RSI.
@@ -4206,9 +4501,11 @@ def plan_rsi_network(df, neighbors, technology='LTE',
 
     Returns DataFrame with:
         cell_id, current_rsi, planned_rsi, ncs, roots_needed,
-        planned_range, cell_range_km, reason
+        planned_range, cell_range_km, reuse_km, reuse_with, reason
     """
     technology = norm_tech(technology)  # UI = tek otorite
+    if rsi_strategy not in RSI_STRATEGIES:
+        raise ValueError(f"rsi_strategy {rsi_strategy!r} — beklenen: {RSI_STRATEGIES}")
     if sector_groups is None:
         sector_groups = {}
     if cell_to_sector is None:
@@ -4358,29 +4655,86 @@ def plan_rsi_network(df, neighbors, technology='LTE',
                     occ.add((nb_rsi + i) % nb_mx)
         return occ
 
+    # --- reuse distance (rsi_strategy='max_reuse') ---------------------------
+    _ids_all = df['cell_id'].astype(str).tolist()
+    _lat = dict(zip(_ids_all, pd.to_numeric(df['latitude'], errors='coerce')))
+    _lon = dict(zip(_ids_all, pd.to_numeric(df['longitude'], errors='coerce')))
+    _space_of = {c: (carrier_map.get(c, CARRIER_UNKNOWN), cell_info[c]['nzc'])
+                 for c in cell_info}
+    _members_by_space = defaultdict(list)
+    for c, sp in _space_of.items():
+        _members_by_space[sp].append(c)
+
+    def _reuse_profile(m, cell_mx):
+        """Per root: distance (km) from m to the nearest assigned cell in m's
+        carrier and root space that occupies that root (inf = unused)."""
+        prof = np.full(cell_mx, np.inf)
+        if pd.isna(_lat.get(m)) or pd.isna(_lon.get(m)):
+            return prof
+        sec = cell_to_sector.get(m)
+        xs = [x for x in _members_by_space[_space_of[m]]
+              if x != m and assigned.get(x) is not None
+              and (sec is None or cell_to_sector.get(x) != sec)
+              and pd.notna(_lat.get(x)) and pd.notna(_lon.get(x))]
+        if not xs:
+            return prof
+        dist = _haversine_vec(_lat[m], _lon[m], [_lat[x] for x in xs], [_lon[x] for x in xs])
+        starts = np.array([assigned[x] for x in xs], dtype=int)
+        rns = np.array([assigned_rn.get(x) or cell_info[x]['roots_needed'] for x in xs], dtype=int)
+        rep = np.repeat(np.arange(len(xs)), rns)
+        offs = np.arange(int(rns.sum())) - np.repeat(np.cumsum(rns) - rns, rns)
+        np.minimum.at(prof, (starts[rep] + offs) % cell_mx, dist[rep])
+        return prof
+
+    def _window_min(prof, rn):
+        """w[c] = min(prof[c .. c+rn-1]) with wrap-around."""
+        w = prof.copy()
+        for i in range(1, rn):
+            w = np.minimum(w, np.roll(prof, -i))
+        return w
+
     def _find_free_rsi(occupied, group, cell_mx):
-        """Lowest start whose whole root range, for every cell of `group`,
-        misses `occupied`.  Returns (start, roots) or (None, None)."""
-        if not any(cell_info[m]['restricted'] for m in group):
+        """A start whose whole root range, for every cell of `group`, misses
+        `occupied`: the lowest such start ('first_fit'), or the one whose
+        nearest reuse is farthest away ('max_reuse').
+        Returns (start, roots) or (None, None)."""
+        restricted_group = any(cell_info[m]['restricted'] for m in group)
+        if not restricted_group:
             rn = max(cell_info[m]['roots_needed'] for m in group)
-            if not occupied:
-                return 0, rn
             forbidden = set()
             for r in occupied:
                 for k in range(rn):
                     forbidden.add((r - k) % cell_mx)
-            for c in range(cell_mx):
-                if c not in forbidden:
-                    return c, rn
-            return None, None
+            clean = [c for c in range(cell_mx) if c not in forbidden]
+            if not clean:
+                return None, None
+            if rsi_strategy == 'first_fit':
+                return clean[0], rn
+            w = None
+            for m in group:
+                wm = _window_min(_reuse_profile(m, cell_mx), cell_info[m]['roots_needed'])
+                w = wm if w is None else np.minimum(w, wm)
+            vals = w[np.array(clean)]
+            return clean[int(np.argmax(vals))], rn   # ties -> lowest start
         # Restricted: the reservation depends on the start, walk the candidates.
+        profs = ({m: _reuse_profile(m, cell_mx) for m in group}
+                 if rsi_strategy != 'first_fit' else None)
+        best = (None, None, -1.0)
         for c in range(cell_mx):
             rn = _group_rn_at(group, c)
             if rn is None or rn > cell_mx:
                 continue
-            if all(((c + i) % cell_mx) not in occupied for i in range(rn)):
+            if any(((c + i) % cell_mx) in occupied for i in range(rn)):
+                continue
+            if profs is None:
                 return c, rn
-        return None, None
+            reuse = min(float(profs[m][(c + np.arange(_rn_at(m, c))) % cell_mx].min())
+                        for m in group)
+            if reuse > best[2]:
+                best = (c, rn, reuse)
+                if reuse == float('inf'):
+                    break
+        return best[0], best[1]
 
     def _assign(group, start):
         for m in group:
@@ -4507,6 +4861,11 @@ def plan_rsi_network(df, neighbors, technology='LTE',
         if found is not None:
             _assign(group, found)
 
+    # Nearest reuse of each cell's roots in the final plan (reviewability, Ö-2)
+    _reuse = rsi_reuse_distances(
+        df, {c: s for c, s in assigned.items() if s is not None}, technology,
+        carrier_map, cell_to_sector)
+
     # Build result table
     rows = []
     for cid in sorted_cells:
@@ -4517,6 +4876,7 @@ def plan_rsi_network(df, neighbors, technology='LTE',
         cur = info['current_rsi']
         cell_mx = info.get('max_rsi', max_rsi)
         changed = (planned != cur) if (planned is not None and cur is not None) else True
+        _rk, _rw = _reuse.get(cid, (float('inf'), None))
         rows.append({
             'cell_id': cid,
             'current_rsi': cur if cur is not None else '—',
@@ -4525,6 +4885,8 @@ def plan_rsi_network(df, neighbors, technology='LTE',
             'roots_needed': rn,
             'planned_range': f"{planned}-{(planned+rn-1)%cell_mx}" if planned is not None else '—',
             'cell_range_km': info['cell_range_km'],
+            'reuse_km': round(_rk, 2) if _rk != float('inf') else None,
+            'reuse_with': _rw or '—',
             'changed': '✅ Değişti' if changed else '— Aynı',
             'reason': (f"RSI {cur}→{planned}: {rn} root, aralık {planned}-{(planned+rn-1)%cell_mx}"
                        if planned is not None and changed
