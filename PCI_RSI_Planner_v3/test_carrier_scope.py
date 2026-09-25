@@ -555,6 +555,51 @@ check(_ad.loc['UN1', 'status'] == 'YETERSİZ', f"40 km HO, Ncs 26 (2.65 km) -> Y
 check(_ad.loc['NOHO', 'status'] == 'HO verisi yok', "HO verisi olmayan hucre isaretlenir")
 
 # ============================================================
+print("\n=== 17. PCI onerileri yeni collision/confusion yaratmamali ===")
+# Her 4 sahadan birinde PCI'lar tasiyicilar arasinda donuk (Samsun SM6003 gibi):
+# sektor grubunun ayni-saha mod3 yasagi {0,1,2} olur, karsilanamaz.  Eski merdiven
+# o durumda confusion yasagini da birakip onlenebilir confusion yaratiyordu;
+# ayrica mod-N'i korumak icin confusion'li adayi hemen kabul ediyordu.
+def _rot_net(seed):
+    rng = _np.random.default_rng(seed)
+    rows = []
+    for s in range(30):
+        base = int(rng.integers(0, 40)) * 3
+        pcis = [base + k for k in range(3)]
+        for k in range(3):
+            for car, earfcn in ((0, 1850), (1, 3000)):
+                p = pcis[(k + 1) % 3] if (s % 4 == 0 and car == 1) else pcis[k]
+                rows.append({'cell_id': f'S{s:02d}{"ABC"[k]}{car}', 'site_id': f'S{s:02d}',
+                             'latitude': 41.0 + (s // 6) * 0.012, 'longitude': 36.0 + (s % 6) * 0.015,
+                             'azimuth': k * 120, 'pci': p, 'rsi': 0, 'earfcn': earfcn,
+                             'prach_config_index': 0, 'zero_correlation_zone': 5})
+    return pd.DataFrame(rows)
+
+_new_s = _new_r = 0
+for _seed in (0, 1, 3):
+    _rd = _rot_net(_seed)
+    _sg, _c2s = E.detect_sector_groups(_rd)
+    _res = E.run_full_analysis(_rd, 3.0, 'LTE', True, 65.0, True, True, True, True, True, None,
+                               cell_to_sector=_c2s, sector_groups=_sg)
+    _nb, _cm = _res['neighbors'], _res['carrier_map']
+    _cnt = lambda d: (_P(E.detect_collisions(d, _nb, 'pci', cell_to_sector=_c2s, carrier_map=_cm))
+                      | _P(E.detect_confusions(d, _nb, 'pci', cell_to_sector=_c2s, carrier_map=_cm)))
+    _before = _cnt(_rd)
+    _s = E.suggest_pci(_rd, _nb, _res, technology='LTE', sector_groups=_sg,
+                       cell_to_sector=_c2s, carrier_map=_cm)
+    _pm = {str(c): int(float(v)) for c, v in zip(_s.cell_id, _s.suggested_pci)
+           if str(v) not in ('—', 'nan', 'None')} if len(_s) else {}
+    _new_s += len(_cnt(_rd.assign(pci=_rd.cell_id.map(_pm).fillna(_rd.pci))) - _before)
+    _tg = sorted({c for p in _before for c in p})[:30]
+    _rs = E.rescan_pci_rsi_for_cells(_rd, _nb, _tg, technology='LTE', sector_groups=_sg,
+                                     cell_to_sector=_c2s, rescan_rsi=False, carrier_map=_cm)
+    _rm = {str(c): int(float(v)) for c, v in zip(_rs.cell_id, _rs.suggested_pci)
+           if str(v) not in ('—', 'nan', 'None')}
+    _new_r += len(_cnt(_rd.assign(pci=_rd.cell_id.map(_rm).fillna(_rd.pci))) - _before)
+check(_new_s == 0, f"suggest_pci yeni collision/confusion yaratmadi ({_new_s})")
+check(_new_r == 0, f"rescan yeni collision/confusion yaratmadi ({_new_r})")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")

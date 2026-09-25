@@ -3448,6 +3448,11 @@ def suggest_pci(df, neighbors, results, technology='LTE',
         (check_mod3, False, False, False, True, True),
         (False, False, False, False, True, True),
         (False, False, False, False, False, True),
+        # Co-site mod3 unsatisfiable (e.g. a sector spanning carriers whose
+        # neighbours use all three classes): keep confusion, drop co-site mod3.
+        # Without this level the last resort dropped BOTH and created a
+        # confusion that was avoidable (real Samsun network, site SM6003).
+        (False, False, False, False, True, False),
         (False, False, False, False, False, False),   # last resort: drop cs_m3 too
     ]
 
@@ -3517,9 +3522,21 @@ def suggest_pci(df, neighbors, results, technology='LTE',
 
         found = None
         _found_is_clean = False  # track if found via clean path (skip score check)
+        # The ladder relaxes mod30 -> mod6 -> mod4 -> mod3 BEFORE confusion.  A
+        # level that only offers confusing candidates must therefore not end
+        # the search: keep its best as a fallback and try relaxing mod-N first.
+        # (v3 took that candidate at once — on the real Samsun network a
+        # suggestion created a confusion to spare a mod4 conflict.)
+        _soft_fallback = None
         for _cfg_idx, (_cm3, _cm4, _cm6, _cm30, _confuse, _cs_m3_chk) in enumerate(_search_configs):
             found_clean = None    # passes ALL checks incl. confusion
             found_soft = None     # passes modN but has confusion
+
+            if not _confuse and _soft_fallback is not None:
+                # Confusion is unavoidable (while keeping co-site mod3): take
+                # the confusing candidate that kept the strictest mod-N.
+                found = _soft_fallback
+                break
 
             for cand in all_cands:
                 # Co-site PCI hard exclusion
@@ -3549,10 +3566,10 @@ def suggest_pci(df, neighbors, results, technology='LTE',
                 found = found_clean
                 _found_is_clean = (_cfg_idx == 0)  # strictest config → guaranteed better
                 break
-            if found_soft is not None:
-                found = found_soft
-                _found_is_clean = False
-                break
+            if found_soft is not None and _soft_fallback is None:
+                _soft_fallback = found_soft
+        if found is None and _soft_fallback is not None:
+            found = _soft_fallback
 
         if found is not None:
             # If candidate is fully clean from strictest config, skip score check
@@ -3579,6 +3596,9 @@ def suggest_pci(df, neighbors, results, technology='LTE',
                                 continue
                             npci = working_pci.get(nb)
                             if npci is None or pd.isna(npci): continue
+                            # Same carrier scope as the forbidden sets (K-1):
+                            # a same PCI on another carrier is not a collision.
+                            if not same_carrier(carrier_map, cc, nb): continue
                             npci = int(npci)
                             if pv == npci:
                                 s += _W_COLLISION
@@ -3603,6 +3623,7 @@ def suggest_pci(df, neighbors, results, technology='LTE',
                                 for nb2 in neighbors.get(nb, set()):
                                     if nb2 in _check_set: continue
                                     if my_sec and cell_to_sector.get(str(nb2)) == my_sec: continue
+                                    if not same_carrier(carrier_map, cc, nb2): continue
                                     n2p = working_pci.get(nb2)
                                     if n2p is not None and not pd.isna(n2p) and int(n2p) == pv:
                                         s += _W_CONFUSION
@@ -3848,6 +3869,11 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
             (check_mod3, False, False, False, True, True),
             (False, False, False, False, True, True),
             (False, False, False, False, False, True),
+            # Co-site mod3 unsatisfiable (e.g. a sector spanning carriers whose
+            # neighbours use all three classes): keep confusion, drop co-site mod3.
+            # Without this level the last resort dropped BOTH and created a
+            # confusion that was avoidable (real Samsun network, site SM6003).
+            (False, False, False, False, True, False),
             (False, False, False, False, False, False),   # last resort: drop cs_m3
         ]
 
@@ -3877,7 +3903,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         if sector_pci is not None:
             for _cm3, _cm4, _cm6, _cm30, _confuse, _cs_m3 in pci_configs:
                 if not _confuse:
-                    break           # never accept a confusion for convention's sake
+                    continue        # never accept a confusion for convention's sake
                 if _pci_is_clean_ex(sector_pci, cid, neighbors, working_pci,
                                     _cm3, _cm6, _cm30, _confuse,
                                     cell_to_sector=cell_to_sector,
@@ -4127,6 +4153,11 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
         (check_mod3, False, False, False, True, True),
         (False, False, False, False, True, True),
         (False, False, False, False, False, True),
+        # Co-site mod3 unsatisfiable (e.g. a sector spanning carriers whose
+        # neighbours use all three classes): keep confusion, drop co-site mod3.
+        # Without this level the last resort dropped BOTH and created a
+        # confusion that was avoidable (real Samsun network, site SM6003).
+        (False, False, False, False, True, False),
         (False, False, False, False, False, False),   # last resort: drop cs_m3 too
     ]
 
@@ -4203,7 +4234,16 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
 
             found_pci = None
             pci_level = ''
+            # Same ladder rule as suggest_pci: a confusing candidate is only a
+            # fallback until mod-N has been relaxed.  v3 took it at the first
+            # level AND labelled it from the level's flags, so a PCI that
+            # created a confusion could be reported as 'Tam uyumlu'.
+            _soft_fallback = None
             for _cm3, _cm4, _cm6, _cm30, _confuse, _cs_m3_chk in pci_configs:
+                if not _confuse and _soft_fallback is not None:
+                    found_pci = _soft_fallback
+                    pci_level = 'Confusion kabul edildi'
+                    break
                 found_clean = None
                 found_soft = None
                 for cand in all_cands:
@@ -4219,9 +4259,8 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                         continue
                     found_clean = cand
                     break
-                result = found_clean if found_clean is not None else found_soft
-                if result is not None:
-                    found_pci = result
+                if found_clean is not None:
+                    found_pci = found_clean
                     all_mod = _cm3 and _confuse
                     if technology == 'NR': all_mod = all_mod and _cm4
                     else: all_mod = all_mod and _cm6 and _cm30
@@ -4229,6 +4268,11 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                     elif _confuse: pci_level = 'ModN gevşetildi'
                     else: pci_level = 'Collision-only'
                     break
+                if found_soft is not None and _soft_fallback is None:
+                    _soft_fallback = found_soft
+            if found_pci is None and _soft_fallback is not None:
+                found_pci = _soft_fallback
+                pci_level = 'Confusion kabul edildi'
 
             if found_pci is None:
                 found_pci = saved_pci
