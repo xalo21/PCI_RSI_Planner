@@ -4473,7 +4473,7 @@ def plan_rsi_network(df, neighbors, technology='LTE',
                      sector_groups=None, cell_to_sector=None,
                      progress_callback=None,
                      carrier_map=None, planning_scope='sector',
-                     rsi_strategy='max_reuse'):
+                     rsi_strategy='max_reuse', _priority_cells=None):
     """Assign RSI values to ALL cells from scratch using cell-range-aware planning.
 
     rsi_strategy — which clean start a cell gets:
@@ -4506,6 +4506,8 @@ def plan_rsi_network(df, neighbors, technology='LTE',
     technology = norm_tech(technology)  # UI = tek otorite
     if rsi_strategy not in RSI_STRATEGIES:
         raise ValueError(f"rsi_strategy {rsi_strategy!r} — beklenen: {RSI_STRATEGIES}")
+    _call_args = (df, neighbors, technology, sector_groups, cell_to_sector,
+                  progress_callback, carrier_map, planning_scope)
     if sector_groups is None:
         sector_groups = {}
     if cell_to_sector is None:
@@ -4556,9 +4558,13 @@ def plan_rsi_network(df, neighbors, technology='LTE',
             'set_type': 'B' if _rs and str(_rs).upper().endswith('B') else 'A',
         }
 
-    # Sort: highest roots_needed first, then highest neighbor-degree
+    # Sort: highest roots_needed first, then highest neighbor-degree.
+    # _priority_cells (internal): cells a previous max_reuse pass could not
+    # place go first, before the root space is spread thin.
+    _prio = set(_priority_cells or ())
     sorted_cells = sorted(cell_info.keys(),
-                          key=lambda c: (-cell_info[c]['roots_needed'],
+                          key=lambda c: (c not in _prio,
+                                         -cell_info[c]['roots_needed'],
                                          -cell_info[c]['degree']))
 
     assigned = {}      # cell_id -> start RSI
@@ -4900,6 +4906,33 @@ def plan_rsi_network(df, neighbors, technology='LTE',
             if col in result_df.columns:
                 result_df[col] = result_df[col].astype(str)
     result_df = enrich_df_with_sector_info(result_df)
+    result_df.attrs['rsi_strategy_used'] = rsi_strategy
+
+    # Spreading roots over the whole space can fragment it: a large cell
+    # (20-30 roots) then finds no contiguous free window.  On the real Burdur
+    # network with its handover list, max_reuse left 10 cells unassigned
+    # where first_fit assigned all.  So: retry with the stuck cells first,
+    # and never return a plan that leaves more cells without an RSI than
+    # first_fit would.  Ties go to max_reuse (better reuse distance).
+    unassigned = [c for c in sorted_cells if assigned.get(c) is None]
+    if rsi_strategy == 'max_reuse' and unassigned and _priority_cells is None:
+        _n = lambda plan: int((plan['planned_rsi'] == '—').sum())
+        options = [(len(unassigned), 0, result_df, None)]
+        retry = plan_rsi_network(*_call_args, rsi_strategy='max_reuse',
+                                 _priority_cells=set(unassigned))
+        options.append((_n(retry), 1, retry,
+                        f"{len(unassigned)} hücre ilk geçişte atanamadı; öncelik verilerek "
+                        f"yeniden planlandı ({_n(retry)} atanamayan)."))
+        if _n(retry):
+            ff = plan_rsi_network(*_call_args, rsi_strategy='first_fit')
+            ff.attrs['rsi_strategy_used'] = 'first_fit'
+            options.append((_n(ff), 2, ff,
+                            f"En uzak yeniden kullanım en iyi {min(len(unassigned), _n(retry))} "
+                            f"hücreyi atayamadı, ilk uygun {_n(ff)} — ilk uygun planı kullanıldı."))
+        best = min(options, key=lambda o: (o[0], o[1]))
+        if best[3]:
+            best[2].attrs['fallback_reason'] = best[3]
+        return best[2]
     return result_df
 
 

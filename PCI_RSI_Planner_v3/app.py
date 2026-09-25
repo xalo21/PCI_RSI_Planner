@@ -1182,6 +1182,9 @@ with tab2:
 - — Aynı kalan: **{len(rsi_plan[rsi_plan['changed']=='— Aynı'])}**
 - ❌ Atanamayan: **{len(rsi_plan[rsi_plan['planned_rsi']=='—'])}**""")
 
+            if rsi_plan.attrs.get('fallback_reason'):
+                st.info("ℹ️ " + rsi_plan.attrs['fallback_reason'])
+
             # Nearest reuse distance, current RSI vs plan (Ö-2)
             if 'reuse_km' in rsi_plan.columns:
                 try:
