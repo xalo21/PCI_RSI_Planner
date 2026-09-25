@@ -412,9 +412,11 @@ Hiçbiri yoksa tüm ağ tek taşıyıcı sayılır.
         prach_df = pd.DataFrame(prach_rows)
         cols_order = ['cell_id','cell_range_input_m','prach_config_index','zero_correlation_zone','preamble_format',
                       'ncs','cell_range_ncs_km','cell_range_exceeded','cell_range_format_km',
-                      'preambles_per_root','roots_needed','rsi']
+                      'cell_range_exceeds_format','preambles_per_root','roots_needed','rsi']
         if 'cell_range_input_m' not in prach_df.columns:
-            cols_order.remove('cell_range_exceeded')   # only meaningful in Huawei mode
+            # only meaningful in Huawei mode
+            cols_order.remove('cell_range_exceeded')
+            cols_order.remove('cell_range_exceeds_format')
         prach_df = prach_df[[c for c in cols_order if c in prach_df.columns]]
         prach_df = enrich_df_with_sector_info(prach_df)
         if 'cell_range_exceeded' in prach_df.columns and prach_df['cell_range_exceeded'].any():
@@ -422,6 +424,20 @@ Hiçbiri yoksa tüm ağ tek taşıyıcı sayılır.
                 f"⚠️ **{int(prach_df['cell_range_exceeded'].sum())} hücrede** cellRange, en büyük "
                 f"Ncs'in karşılayabileceği menzilden büyük — bu hücreler en büyük Ncs ile "
                 f"planlanıyor. Tabloda `cell_range_exceeded` sütununa bakın.")
+        if ('cell_range_exceeds_format' in prach_df.columns
+                and prach_df['cell_range_exceeds_format'].any()):
+            _nf = int(prach_df['cell_range_exceeds_format'].sum())
+            _no_pcfg = 'prach_config_index' not in df.columns
+            st.info(
+                f"ℹ️ **{_nf} hücrede** cellRange, preamble formatının izin verdiği menzilden "
+                f"büyük (format 0: 14.5 km, format 1: 77.3 km, format 2: 29.5 km, "
+                f"format 3: 102.7 km). "
+                + ("Veride `prach_config_index` sütunu yok, bu yüzden format 0 varsayıldı — "
+                   "bu hücreler gerçekte büyük olasılıkla format 1 veya 3 kullanıyor. "
+                   if _no_pcfg else
+                   "Bu hücrelerin `prach_config_index` değerini kontrol edin. ")
+                + "**RSI planı bundan etkilenmez**: format 0-3 aynı Ncs tablosunu ve aynı "
+                  "cyclic shift penceresini kullanır. Tabloda `cell_range_exceeds_format`.")
         st.dataframe(prach_df, use_container_width=True, height=300)
         st.session_state.prach_info = prach_df
 
@@ -3288,22 +3304,30 @@ Tüm ağ için sıfırdan RSI atar — **Greedy Interval Graph Coloring**:
 ```
 1. Ön hazırlık:
    a. Her hücrenin prach_config_index'inden format tespit et
-      ─ NR: get_nr_preamble_info(pcfg) → (is_short, nzc, tseq)
-      ─ LTE: Nzc=839, max_rsi=838 (sabit)
+      ─ NR: FDD / TDD / FR2 tablosundan (aşağıdaki NR Format Tespiti)
+      ─ LTE: format 0-3 → Nzc=839, format 4 → Nzc=139
    b. Her hücrenin roots_needed değerini hesapla
-   c. cell_max_rsi sözlüğü oluştur (hücre bazında wrapping sınırı)
+      ─ Yüksek hız (restricted) hücrede kök sayısı başlangıç RSI'ına
+        bağlıdır; her aday RSI için ayrıca hesaplanır
+   c. Kök alanı: L=839 → 0-837 (838 kök), L=139 → 0-137 (138 kök)
+   d. Ortak sektör grubu = aynı sektördeki AYNI L_RA'lı hücreler.
+      Uzun ve kısa formatlı hücreler farklı kök alanındadır, aynı RSI'ı
+      paylaşamaz ve birbirini kısıtlamaz
 
 2. Hücreleri sırala (ZORLUK SIRALAMASI):
    → Önce en çok root ihtiyacı olan (geniş aralık kaplayanlar)
    → Eşitlikte en çok komşusu olan (en kısıtlı hücreler)
 
-3. Her hücre için:
-   a. 1. ve 2. halka komşularının kullandığı root indekslerini topla
-      → occupied = {komşunun tüm root indeksleri mod pair_max}
-   b. RSI=0'dan cell_max_rsi'ye kadar tara
-   c. [RSI, RSI + roots_needed) aralığı (mod cell_max_rsi)
-      hiçbir occupied root ile örtüşmüyorsa → ATA
+3. Her hücre (sektör grubu) için:
+   a. Grubun tüm hücrelerinin 1. ve 2. halka komşularının — aynı L_RA'lı
+      olanların — kullandığı root indekslerini topla
+   b. RSI=0'dan kök alanının sonuna kadar tara
+   c. [RSI, RSI + roots_needed) aralığı, gruptaki her hücre için
+      hiçbir occupied root ile örtüşmüyorsa → gruba ATA
    d. Çalışan haritayı güncelle
+
+Öneriler, Tarama ve Yeni Hücre sekmeleri aynı kuralları kullanır: aday RSI,
+kopyalanacağı her ortak sektör hücresinin kendi taşıyıcısında da temiz olmalıdır.
 
 4. Wrapping: RSI, hücrenin max_rsi'sine ulaşınca 0'a sarar
    ─ LTE: mod 838    (RSI 0-837 arası döngü)
@@ -3312,13 +3336,23 @@ Tüm ağ için sıfırdan RSI atar — **Greedy Interval Graph Coloring**:
 ```
 
 ### NR Format Tespiti
-```python
-# get_nr_preamble_info(prach_config_index) fonksiyonu:
-#   pcfg 0-27  → (False, 839, tseq_us)  # Long sequence
-#   pcfg 28+   → (True,  139, tseq_us)  # Short sequence
-```
-Bu tespit **her hücre için ayrı ayrı** yapılır, böylece aynı ağda
-hem L=839 hem L=139 hücreler bulunabilir.
+`prach_config_index`'in hangi formata karşılık geldiği **üç ayrı 3GPP
+tablosundan** okunur. Hangi tablonun geçerli olduğu hücrenin bandından
+(ya da `duplex` sütunundan) belirlenir:
+
+| pcfg | FR1 FDD (T6.3.3.2-2) | FR1 TDD (T6.3.3.2-3) | FR2 (T6.3.3.2-4) |
+|:---:|:---:|:---:|:---:|
+| 0–27 | format 0 | format 0 | kısa (A1) |
+| 28–52 | format 1 | 28–33: 1, 34–39: 2, 40–52: 3 | kısa |
+| 53–59 | format 2 | format 3 | kısa |
+| 60–66 | format 3 | format 3 | kısa |
+| 67–86 | format 3 | kısa (A1) | kısa |
+| 87–255 | kısa | kısa | kısa |
+| 256–262 | tanımsız | format 0 | tanımsız |
+
+Uzun formatlar L=839 (format 0-2: 1.25 kHz, format 3: 5 kHz), kısa formatlar
+L=139 (Δf_RA = msg1-SubcarrierSpacing). Tespit **her hücre için ayrı ayrı**
+yapılır, böylece aynı ağda hem L=839 hem L=139 hücreler bulunabilir.
 
 ### Neden En Zor Hücre Önce?
 Çok root kullanan hücreler (büyük Ncs) daha geniş RSI aralığı kaplar.

@@ -373,6 +373,108 @@ check(not _dup, f"tekrar eden plotly_chart key'i yok ({_dup})")
 print(f"       {len(_keys)} grafik, hepsi benzersiz")
 
 # ============================================================
+print("\n=== 13. RSI planlama: yuksek hiz, karma L_RA, cok tasiyicili sektor ===")
+import numpy as _np
+import pci_engine as E
+
+
+def _apply(df_, plan_, col):
+    d = df_.copy()
+    d['cell_id'] = d['cell_id'].astype(str)
+    for _, r in plan_.iterrows():
+        if str(r[col]).isdigit():
+            d.loc[d.cell_id == str(r['cell_id']), 'rsi'] = int(r[col])
+    return d
+
+
+def _ctx(df_, tech):
+    sg_, c2s_ = E.detect_sector_groups(df_)
+    nb_, _, _ = E.find_neighbors(df_, radius_km=5.0)
+    return sg_, c2s_, nb_, E.build_carrier_map(df_)
+
+
+# (a) Yuksek hiz: kok sayisi baslangica bagli.  Planlayici eskiden mevcut RSI'daki
+#     sayiyi yeni RSI'da ayiriyor, kendi planinda cakisma birakiyordu.
+_rng = _np.random.default_rng(0)
+_hs = pd.DataFrame([{'cell_id': f'HS{s}{k}', 'site_id': f'S{s}', 'latitude': 41.0 + s*0.012,
+                     'longitude': 36.0 + (s % 3)*0.012, 'azimuth': k*120, 'pci': s*3+k,
+                     'rsi': int(_rng.integers(0, 838)), 'zero_correlation_zone': 8,
+                     'prach_config_index': 3, 'high_speed': 'typeA', 'earfcn': 1800}
+                    for s in range(8) for k in range(3)])
+_sg, _c2s, _nb, _cm = _ctx(_hs, 'LTE')
+_pl = E.plan_rsi_network(_hs, _nb, technology='LTE', sector_groups=_sg, cell_to_sector=_c2s, carrier_map=_cm)
+_under = sum(1 for _, r in _pl.iterrows() if str(r['planned_rsi']).isdigit() and
+             E._prach_params(_hs[_hs.cell_id == r['cell_id']].iloc[0].to_dict(), 'LTE',
+                             rsi=int(r['planned_rsi']))['roots_needed'] > int(r['roots_needed']))
+check(_under == 0, f"yuksek hiz: ayrilan kok her hucrede yeterli ({_under} yetersiz)")
+_after = E.detect_rsi_collisions(_apply(_hs, _pl, 'planned_rsi'), _nb, technology='LTE',
+                                 cell_to_sector=_c2s, carrier_map=_cm)
+check(len(_after) == 0, f"yuksek hiz: plan sonrasi cakisma yok ({len(_after)})")
+_sug = E.suggest_rsi(_hs, _nb, {'rsi_collisions': E.detect_rsi_collisions(
+    _hs, _nb, technology='LTE', cell_to_sector=_c2s, carrier_map=_cm)},
+    technology='LTE', sector_groups=_sg, cell_to_sector=_c2s, carrier_map=_cm)
+_after = E.detect_rsi_collisions(_apply(_hs, _sug, 'suggested_rsi'), _nb, technology='LTE',
+                                 cell_to_sector=_c2s, carrier_map=_cm)
+check(len(_after) == 0, f"yuksek hiz: suggest_rsi sonrasi cakisma yok ({len(_after)})")
+
+# (b) Ayni sektorde uzun (L=839) + kisa (L=139) hucre: kisa hucreye 137'den buyuk
+#     RSI yazilmamali.  Eskiden uzun hucrenin RSI'i kopyalaniyordu.
+_mix = []
+for s in range(10):
+    for k in range(3):
+        base = dict(site_id=f'S{s}', latitude=41.0 + (s//4)*0.01, longitude=36.0 + (s % 4)*0.01, azimuth=k*120)
+        _mix.append({**base, 'cell_id': f'L{s}{k}', 'pci': (s*3+k)*2, 'rsi': 0, 'prach_config_index': 12,
+                     'zero_correlation_zone': 14, 'band': 1800, 'earfcn': 1850})
+        _mix.append({**base, 'cell_id': f'T{s}{k}', 'pci': (s*3+k)*2+1, 'rsi': 0, 'prach_config_index': 158,
+                     'zero_correlation_zone': 12, 'band': 3500, 'earfcn': 632628, 'msg1_scs_khz': 30})
+_mix = pd.DataFrame(_mix)
+_sg, _c2s, _nb, _cm = _ctx(_mix, 'NR')
+_pl = E.plan_rsi_network(_mix, _nb, technology='NR', sector_groups=_sg, cell_to_sector=_c2s, carrier_map=_cm)
+_short = _pl[_pl.cell_id.str.startswith('T')]
+_bad = int((_short.planned_rsi.astype(int) > 137).sum())
+check(_bad == 0, f"karma L_RA: kisa formatli hucreye >137 RSI atanmadi ({_bad})")
+# Yeni kisa formatli hucre, kok alani (0-137) komsularca TAMAMEN dolu bir yerde:
+# 11 komsu x 13 kok = 0..142, sarmayla 0..137'nin hepsi.  Dogru cevap "yer yok";
+# eski kod 838 modulunu kullanip 143 oneriyordu.
+_sat = pd.DataFrame([{'cell_id': f'SAT{i}', 'site_id': f'SS{i}', 'latitude': 41.0 + 0.001*(i % 4),
+                      'longitude': 36.0 + 0.001*(i // 4), 'azimuth': 30*i, 'pci': 3*i,
+                      'rsi': 13*i, 'prach_config_index': 158, 'zero_correlation_zone': 12,
+                      'band': 3500, 'earfcn': 632628, 'msg1_scs_khz': 30} for i in range(11)])
+_newc = _sat.iloc[:1].copy()
+_newc['cell_id'] = ['SATNEW']; _newc['site_id'] = 'SSNEW'
+_newc['latitude'] = 41.0015; _newc['longitude'] = 36.0015
+_out = E.find_optimal_pci_rsi_for_new_cells(_sat, _newc, 5.0, technology='NR',
+                                            use_antenna_direction=False)
+_v = str(_out['suggested_rsi'].iloc[0])
+check(not _v.isdigit() or int(_v) <= 137,
+      f"dolu kok alaninda yeni kisa hucreye >137 RSI onerilmedi (oneri: {_v})")
+
+# (c) Cok tasiyicili sektor: onerilen RSI sektordeki DIGER tasiyicilara da
+#     kopyalanir, orada da temiz olmali.  Samsun'da eskiden 5 yeni cakisma birakiyordu.
+#     X sektoru iki tasiyicida (XA, XB).  XA, A tasiyicisinda ZA ile cakisiyor.
+#     A tarafinda en kucuk temiz RSI 10; ama B tarafinda YB 10-19'u kullaniyor.
+#     Yalniz lideri kontrol eden eski kod 10'u XB'ye kopyalayip yeni cakisma yaratir.
+_base = dict(prach_config_index=3, zero_correlation_zone=12)   # Ncs 119 -> 10 kok
+_mc = pd.DataFrame([
+    {**_base, 'cell_id': 'XA', 'site_id': 'X', 'latitude': 41.00, 'longitude': 36.000, 'azimuth': 0,   'pci': 1, 'rsi': 0,  'earfcn': 1850},
+    {**_base, 'cell_id': 'XB', 'site_id': 'X', 'latitude': 41.00, 'longitude': 36.000, 'azimuth': 0,   'pci': 1, 'rsi': 0,  'earfcn': 3000},
+    {**_base, 'cell_id': 'YA', 'site_id': 'Y', 'latitude': 41.01, 'longitude': 36.000, 'azimuth': 180, 'pci': 2, 'rsi': 50, 'earfcn': 1850},
+    {**_base, 'cell_id': 'YB', 'site_id': 'Y', 'latitude': 41.01, 'longitude': 36.000, 'azimuth': 180, 'pci': 2, 'rsi': 10, 'earfcn': 3000},
+    {**_base, 'cell_id': 'ZA', 'site_id': 'Z', 'latitude': 41.01, 'longitude': 36.002, 'azimuth': 180, 'pci': 3, 'rsi': 0,  'earfcn': 1850},
+])
+_sg, _c2s, _nb, _cm = _ctx(_mc, 'LTE')
+_before = E.detect_rsi_collisions(_mc, _nb, technology='LTE', cell_to_sector=_c2s, carrier_map=_cm)
+_sug = E.suggest_rsi(_mc, _nb, {'rsi_collisions': _before}, technology='LTE',
+                     sector_groups=_sg, cell_to_sector=_c2s, carrier_map=_cm)
+_after = E.detect_rsi_collisions(_apply(_mc, _sug, 'suggested_rsi'), _nb, technology='LTE',
+                                 cell_to_sector=_c2s, carrier_map=_cm)
+_P = lambda t: {tuple(sorted((str(a), str(b)))) for a, b in zip(t['cell_1'], t['cell_2'])} if len(t) else set()
+check(not (_P(_after) - _P(_before)),
+      f"cok tasiyicili sektor: oneriler yeni cakisma yaratmadi ({len(_P(_after) - _P(_before))})")
+check(len(_after) <= len(_before),
+      f"cok tasiyicili sektor: cakisma azaldi ({len(_before)} -> {len(_after)})")
+
+# ============================================================
 print("\n" + "=" * 60)
 if _fails:
     print(f"{len(_fails)} TEST BASARISIZ:")

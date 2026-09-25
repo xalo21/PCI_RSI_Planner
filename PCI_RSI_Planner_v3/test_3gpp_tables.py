@@ -284,11 +284,14 @@ for label, exp, kw in (
     for zcz, e in enumerate(exp):
         got = E.get_ncs(zcz, 'NR', **kw)
         spec(g11, got == (e or 0), f"{label}, zcz={zcz}: {got} != {e}")
-# Tablo secimi hucre satirindan da dogru yapiliyor mu: NR format 3 (pcfg=23)
-# 5 kHz tablosunu okumali.  v3 2026-09'a kadar 1.25 kHz tablosunu okuyordu.
-_f3 = E._prach_params({'prach_config_index': 23, 'zero_correlation_zone': 5}, 'NR')
-spec(g11, _f3['delta_f_ra_khz'] == 5.0 and _f3['ncs'] == 41,
-     f"NR format 3, zcz=5: Ncs={_f3['ncs']} (spec 41), dfRA={_f3['delta_f_ra_khz']}")
+# Tablo secimi hucre satirindan da dogru yapiliyor mu: NR format 3 5 kHz
+# tablosunu okumali.  Format 3 = pcfg 60-86 (FDD, T6.3.3.2-2) / 40-66 (TDD,
+# T6.3.3.2-3).  v3 2026-09'a kadar 1.25 kHz tablosunu okuyordu.
+for _row, _lbl in (({'prach_config_index': 60, 'zero_correlation_zone': 5, 'band': 1800}, 'FDD pcfg 60'),
+                   ({'prach_config_index': 40, 'zero_correlation_zone': 5, 'band': 3500}, 'TDD pcfg 40')):
+    _f3 = E._prach_params(_row, 'NR')
+    spec(g11, _f3['delta_f_ra_khz'] == 5.0 and _f3['ncs'] == 41,
+         f"NR format 3 ({_lbl}), zcz=5: Ncs={_f3['ncs']} (spec 41), dfRA={_f3['delta_f_ra_khz']}")
 
 # ============================================================
 # Huawei'nin Ncs -> Cell Radius tablosu (unrestricted ve high speed sutunlari).
@@ -309,7 +312,7 @@ for ncs, km in HUAWEI_RADIUS_KM.items():
 g13 = group('cellRange -> zcz: cell_range_from_ncs ile tam ters')
 _tables = (('LTE', {}, 0), ('LTE', {'restricted': 'typeA'}, 0),
            ('LTE', {'restricted': 'typeB'}, 0),
-           ('NR', {}, 0), ('NR', {}, 23))                 # NR pcfg 23 = format 3
+           ('NR', {}, 0), ('NR', {}, 60))                 # NR FDD pcfg 60 = format 3
 for tech, kw, pcfg in _tables:
     p = E._prach_params({'prach_config_index': pcfg, 'zero_correlation_zone': 1}, tech)
     tbl = E.ncs_table(tech, kw.get('restricted', False), p['is_short'], p['delta_f_ra_khz'])
@@ -339,6 +342,61 @@ spec(g13, not E._prach_params({'cell_range': 3000}, 'LTE')['cell_range_exceeded'
      "_prach_params 3 km hucreyi isaretlememeli")
 spec(g13, not E._prach_params({'zero_correlation_zone': 5}, 'LTE')['cell_range_exceeded'],
      "Nokia modunda (cell_range yok) isaret olmamali")
+
+# ============================================================
+# NR prach-ConfigurationIndex -> format.  Beklenen araliklar ETSI TS 138 211
+# V19.4.0 Tablo 6.3.3.2-2 / -3 / -4'ten (PDF tablolarindan hucre hucre
+# cikarildi, ilk sayfalar gozle karsilastirildi).  v3 2026-09'a kadar tek bir
+# elle yazilmis kural kullaniyordu: 16-27'yi format 1/2/3, >=28'i kisa sayiyordu.
+NR_FMT_FDD = [(0, 27, '0'), (28, 52, '1'), (53, 59, '2'), (60, 86, '3'),
+              (87, 107, 'A1'), (108, 116, 'A1/B1'), (117, 136, 'A2'), (137, 146, 'A2/B2'),
+              (147, 166, 'A3'), (167, 176, 'A3/B3'), (177, 197, 'B1'), (198, 218, 'B4'),
+              (219, 235, 'C0'), (236, 255, 'C2')]
+NR_FMT_TDD = [(0, 27, '0'), (28, 33, '1'), (34, 39, '2'), (40, 66, '3'),
+              (67, 86, 'A1'), (87, 109, 'A2'), (110, 132, 'A3'), (133, 144, 'B1'),
+              (145, 168, 'B4'), (169, 188, 'C0'), (189, 210, 'C2'), (211, 225, 'A1/B1'),
+              (226, 240, 'A2/B2'), (241, 255, 'A3/B3'), (256, 262, '0')]
+NR_FMT_FR2 = [(0, 28, 'A1'), (29, 58, 'A2'), (59, 88, 'A3'), (89, 111, 'B1'),
+              (112, 143, 'B4'), (144, 172, 'C0'), (173, 201, 'C2'), (202, 219, 'A1/B1'),
+              (220, 237, 'A2/B2'), (238, 255, 'A3/B3')]
+g14 = group('NR prach-ConfigurationIndex -> format (T6.3.3.2-2/-3/-4)')
+for label, runs, kw in (('FDD', NR_FMT_FDD, dict(duplex='FDD')),
+                        ('TDD', NR_FMT_TDD, dict(duplex='TDD')),
+                        ('FR2', NR_FMT_FR2, dict(fr2=True))):
+    for a, b, f in runs:
+        for i in range(a, b + 1):
+            got = E.nr_preamble_format(i, **kw)
+            spec(g14, got == f, f"{label} pcfg={i}: {got} != {f}")
+    last = runs[-1][1]
+    spec(g14, E.nr_preamble_format(last + 1, **kw) is None,
+         f"{label} pcfg={last + 1}: tabloda yok, None donmeli")
+# Hucre satirindan: bant -> FDD/TDD, FR2 -> hep kisa
+for row, exp_short, exp_nzc, lbl in (
+        ({'prach_config_index': 20, 'band': 3500}, False, 839, 'TDD pcfg 20 -> format 0'),
+        ({'prach_config_index': 30, 'band': 1800}, False, 839, 'FDD pcfg 30 -> format 1'),
+        ({'prach_config_index': 30, 'band': 3500}, False, 839, 'TDD pcfg 30 -> format 1'),
+        ({'prach_config_index': 70, 'band': 3500}, True, 139, 'TDD pcfg 70 -> A1 (kisa)'),
+        ({'prach_config_index': 70, 'band': 1800}, False, 839, 'FDD pcfg 70 -> format 3'),
+        ({'prach_config_index': 5, 'band': 28000}, True, 139, 'FR2 pcfg 5 -> A1 (kisa)')):
+    p = E._prach_params(row, 'NR')
+    spec(g14, p['is_short'] == exp_short and p['nzc'] == exp_nzc,
+         f"{lbl}: is_short={p['is_short']}, Nzc={p['nzc']}")
+spec(g14, E._prach_params({'prach_config_index': 260, 'band': 1800}, 'NR')['invalid_prach_config'],
+     "FDD pcfg 260 tanimsiz, invalid_prach_config isaretlenmeli")
+
+# ============================================================
+# Preamble formatinin izin verdigi menzil: gidis-donus hem T_CP'ye hem koruma
+# suresine (GT = alt cerceve x 1 ms - T_CP - T_SEQ) sigmali.  TS 36.211 T5.7.1-1.
+g15 = group('LTE format menzili = min(T_CP, T_GT) x c / 2')
+for fmt, km in ((0, 14.53), (1, 77.34), (2, 29.53), (3, 102.66), (4, 2.19)):
+    got = E.cell_range_from_format(fmt)
+    spec(g15, abs(got - km) < 0.02, f"format {fmt}: {got:.2f} km != {km} km")
+_i = E.compute_cell_prach_info({'cell_range': 38000, 'prach_config_index': 0}, 'LTE')
+spec(g15, _i['cell_range_exceeds_format'],
+     "38 km hucre format 0'a sigmaz, isaretlenmeli")
+_i = E.compute_cell_prach_info({'cell_range': 38000, 'prach_config_index': 16}, 'LTE')
+spec(g15, not _i['cell_range_exceeds_format'],
+     "38 km hucre format 1'e sigar, isaretlenmemeli")
 
 # ============================================================
 print("=" * 74)

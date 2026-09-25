@@ -395,6 +395,7 @@ from prach_tables import (
     NR_NCS_1P25_UNRESTRICTED_SPEC, NR_NCS_1P25_RESTRICTED_A_SPEC,
     NR_NCS_1P25_RESTRICTED_B_SPEC, NR_NCS_5_UNRESTRICTED_SPEC,
     NR_NCS_5_RESTRICTED_A_SPEC, NR_NCS_5_RESTRICTED_B_SPEC, NR_NCS_L139_SPEC,
+    NR_PRACH_FORMAT_FR1_PAIRED, NR_PRACH_FORMAT_FR1_UNPAIRED, NR_PRACH_FORMAT_FR2,
 )
 
 def _clean(d):
@@ -470,10 +471,12 @@ NR_PREAMBLE_FORMATS = {
 
 LTE_DELTA_F_RA_KHZ = {0: 1.25, 1: 1.25, 2: 1.25, 3: 1.25, 4: 7.5}
 
-# NR prach-ConfigurationIndex -> long format, FR1 (TS 38.211 T6.3.3.2-2/3).
-# Index >= 28 is a short format.  In FR2 every index is short, which is handled
-# by the caller through the subcarrier spacing / band.
-NR_LONG_FORMAT_BY_CFG = ((15, 0), (19, 1), (22, 2), (27, 3))
+# NR prach-ConfigurationIndex -> preamble format comes from three different
+# tables (TS 38.211 T6.3.3.2-2 FDD, -3 TDD, -4 FR2), now in prach_tables.py.
+# Until 2026-09 v3 used one hand-written rule for all three — 0-15 format 0,
+# 16-19 format 1, 20-22 format 2, 23-27 format 3, >=28 short — which the spec
+# contradicts almost everywhere: 0-27 are ALL format 0 in both FR1 tables,
+# 28-86 (FDD) / 28-66 (TDD) are long formats 1-3, and FR2 is short throughout.
 
 
 def sequence_window_us(delta_f_ra_khz):
@@ -507,25 +510,57 @@ def nr_short_delta_f_khz(scs_khz=None, band_mhz=None):
     return 15.0              # sub-3 GHz NR
 
 
-def get_nr_preamble_info(prach_config_index=0):
+def nr_is_fr2(band_mhz=None, scs_khz=None):
+    """FR2 if the band is above 24 GHz, or msg1-SubcarrierSpacing is 60/120 kHz
+    (those spacings exist for PRACH only in FR2)."""
+    for v, lim in ((band_mhz, 24000.0), (scs_khz, 60.0)):
+        try:
+            if v is not None and not pd.isna(v) and float(v) >= lim:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def nr_preamble_format(prach_config_index, duplex='FDD', fr2=False):
+    """Preamble format string for an NR prach-ConfigurationIndex, or None when
+    the index does not exist in the table that applies (e.g. 256-262 in FDD)."""
+    try:
+        pcfg = int(prach_config_index)
+    except (TypeError, ValueError):
+        return None
+    if fr2:
+        table = NR_PRACH_FORMAT_FR2
+    elif str(duplex).upper() == 'TDD':
+        table = NR_PRACH_FORMAT_FR1_UNPAIRED
+    else:
+        table = NR_PRACH_FORMAT_FR1_PAIRED
+    return table[pcfg] if 0 <= pcfg < len(table) else None
+
+
+def get_nr_preamble_info(prach_config_index=0, duplex='FDD', fr2=False):
     """NR preamble sequence length and subcarrier spacing from the config index.
 
-    prach-ConfigurationIndex 0-27 -> long sequence (formats 0-3, L_RA=839)
-    prach-ConfigurationIndex >= 28 -> short sequence (A1-C2, L_RA=139)
+    The format comes from the table that applies to the cell: FR1 FDD (T6.3.3.2-2),
+    FR1 TDD (T6.3.3.2-3) or FR2 (T6.3.3.2-4).  Long formats 0-2 run at 1.25 kHz,
+    format 3 at 5 kHz; short formats take delta_f_RA from msg1-SubcarrierSpacing,
+    so None is returned for them and the caller fills it in.
 
-    Returns (is_short, nzc, delta_f_ra_khz, format_label).  Note the third
-    value is now the SUBCARRIER SPACING, not a T_SEQ: callers derive the
-    cyclic-shift window with sequence_window_us().
+    An index that the applicable table does not define falls back to format 0;
+    callers flag it through nr_preamble_format() returning None.
+
+    Returns (is_short, nzc, delta_f_ra_khz, format_label).
     """
-    pcfg = int(prach_config_index) if not pd.isna(prach_config_index) else 0
-    if pcfg >= 28:
-        return True, NZC_SHORT, None, 'Short (L=139)'
-    for hi, fmt in NR_LONG_FORMAT_BY_CFG:
-        if pcfg <= hi:
-            # Format 3 is the odd one out: 5 kHz, so a quarter of the shift
-            # window that formats 0-2 get from the same Ncs.
-            return False, NZC_LONG, (5.0 if fmt == 3 else 1.25), f'Format {fmt} (Long)'
-    return False, NZC_LONG, 1.25, 'Format 0 (Long)' 
+    try:
+        pcfg = int(prach_config_index) if not pd.isna(prach_config_index) else 0
+    except (TypeError, ValueError):
+        pcfg = 0
+    fmt = nr_preamble_format(pcfg, duplex, fr2) or '0'
+    if fmt in ('0', '1', '2', '3'):
+        # Format 3 is the odd one out: 5 kHz, so a quarter of the shift window
+        # that formats 0-2 get from the same Ncs, and its own Ncs table.
+        return False, NZC_LONG, (5.0 if fmt == '3' else 1.25), f'Format {fmt} (Long)'
+    return True, NZC_SHORT, None, f'Format {fmt} (Short)'
 
 # ============================================================
 # Band / Bandwidth Detection from Cell ID Naming Convention
@@ -1354,8 +1389,20 @@ def cell_range_from_ncs(ncs, nzc=NZC_LONG, tseq_us=800.0):
     return max(window_us, 0.0) * 1e-6 * SPEED_OF_LIGHT / 2 / 1000
 
 def cell_range_from_format(fmt, tech='LTE'):
-    tcp = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])['tcp_us']
-    return tcp*1e-6 * SPEED_OF_LIGHT / 2 / 1000
+    """Largest cell radius an LTE preamble FORMAT allows (km).
+
+    The round trip has to fit in the cyclic prefix AND in the guard time left
+    after the sequence (TS 36.211 T5.7.1-1: GT = subframes x 1 ms - T_CP -
+    T_SEQ).  Formats 0, 1 and 2 are guard-time limited — v3 used T_CP alone
+    and showed format 1 as 102.7 km where the guard time allows 77.3 km.
+    Format 4 sits in UpPTS and is CP limited.
+    """
+    f = LTE_PREAMBLE_FORMATS.get(fmt, LTE_PREAMBLE_FORMATS[0])
+    limit_us = f['tcp_us']
+    if fmt != 4:
+        guard_us = f['subframes'] * 1000.0 - f['tcp_us'] - f['tseq_us']
+        limit_us = min(limit_us, guard_us)
+    return limit_us * 1e-6 * SPEED_OF_LIGHT / 2 / 1000
 
 def preambles_per_root(ncs, nzc=NZC_LONG):
     """Cyclic shifts per root in the UNRESTRICTED set: floor(N_ZC / N_CS).
@@ -1533,6 +1580,40 @@ def rsi_overlap(rsi1, ncs1, rsi2, ncs2, nzc=NZC_LONG, npre=64, max_rsi=LTE_RSI_C
     s2 = {(rsi2+i)%max_rsi for i in range(r2)}
     return len(s1 & s2) > 0
 
+
+def root_space_size(nzc=NZC_LONG):
+    """Number of logical root indices = the wrap modulus: 838 (L=839), 138 (L=139)."""
+    return (NZC_SHORT - 1) if int(nzc) == NZC_SHORT else (NZC_LONG - 1)
+
+
+def cell_root_count(start, ncs, nzc=NZC_LONG, restricted=False, candidate=False):
+    """Roots a cell consumes when its RSI is `start`.
+
+    Unrestricted: a constant.  Restricted: walked from `start` (K-2).  When the
+    walk cannot reach 64 preambles, a CANDIDATE start is unusable (None); for
+    an existing assignment the typical bound is used — the same number
+    _prach_params() reports, so the checkers and the detector agree.
+    """
+    if not restricted:
+        return roots_needed(64, ncs, nzc)
+    set_type = 'B' if str(restricted).upper().endswith('B') else 'A'
+    rn = roots_needed_for_cell(start, ncs, nzc, restricted=True, set_type=set_type)
+    if rn is None and not candidate:
+        rn = restricted_roots_bounds(ncs, nzc, set_type)[1]
+    return rn
+
+
+def cell_root_set(start, ncs, nzc=NZC_LONG, restricted=False, candidate=False):
+    """Logical root indices a cell occupies from `start`, wrapped in its own root
+    space.  None when `start` is not a usable RSI for this cell."""
+    mx = root_space_size(nzc)
+    if start is None or int(start) < 0 or int(start) >= mx:
+        return None
+    rn = cell_root_count(int(start), ncs, nzc, restricted, candidate)
+    if rn is None or rn > mx:
+        return None
+    return {(int(start) + i) % mx for i in range(rn)}
+
 # ============================================================
 # Huawei cellRange → zcz Reverse Mapping
 # ============================================================
@@ -1560,7 +1641,8 @@ def derive_zcz_from_cell_range(cell_range_m, technology='LTE',
     # Determine Nzc, the sequence window and the Ncs table
     if technology == 'NR':
         _pcfg = int(preamble_format) if isinstance(preamble_format, (int, float)) else 0
-        is_short, nzc, _dfra, _lbl = get_nr_preamble_info(_pcfg)
+        is_short, nzc, _dfra, _lbl = get_nr_preamble_info(
+            _pcfg, duplex, nr_is_fr2(band_mhz, scs_khz))
         if is_short:
             _dfra = nr_short_delta_f_khz(scs_khz, band_mhz)
     else:
@@ -1682,12 +1764,16 @@ def _prach_params(row, technology='LTE', rsi=None):
     duplex = None
     invalid_pcfg = False
     if technology == 'NR':
-        is_short, nzc, dfra, fmt = get_nr_preamble_info(pcfg)
+        _band = row.get('band') if row.get('band') is not None else row.get('band_mhz')
+        duplex = cell_duplex(row)
+        _fr2 = nr_is_fr2(_band, row.get('msg1_scs_khz'))
+        is_short, nzc, dfra, fmt = get_nr_preamble_info(pcfg, duplex, _fr2)
+        # Index not defined in the table that applies (FDD 256-262): format 0
+        # fallback above, flagged here — same treatment as LTE N/A indices.
+        invalid_pcfg = nr_preamble_format(pcfg, duplex, _fr2) is None
         if is_short:
             # L_RA=139 window is set by msg1-SubcarrierSpacing (15*2^mu kHz).
-            dfra = nr_short_delta_f_khz(row.get('msg1_scs_khz'),
-                                        row.get('band') if row.get('band') is not None
-                                        else row.get('band_mhz'))
+            dfra = nr_short_delta_f_khz(row.get('msg1_scs_khz'), _band)
     else:
         duplex = cell_duplex(row)
         fmt = get_lte_preamble_format(pcfg, duplex)
@@ -1776,6 +1862,14 @@ def compute_cell_prach_info(row, technology='LTE'):
     # return a meaningless number, so report nothing rather than something wrong.
     fmt_km = (round(cell_range_from_format(p['preamble_format'], technology), 2)
               if technology == 'LTE' else None)
+    # Huawei mode: does the configured cellRadius even fit the preamble format?
+    # When prach_config_index is missing it defaults to 0 (format 0, 14.5 km),
+    # so a 38 km cell is a sign the index is missing, not that the cell is
+    # wrong.  RSI is unaffected — formats 0-3 share one Ncs table and window.
+    _cr = row.get('cell_range')
+    exceeds_format = bool(
+        fmt_km is not None and _cr is not None and not pd.isna(_cr)
+        and float(_cr) > fmt_km * 1000.0)
     return {
         'preamble_format': p['preamble_format'], 'ncs': p['ncs'], 'nzc': p['nzc'],
         'effective_zcz': p['zcz'],
@@ -1788,7 +1882,8 @@ def compute_cell_prach_info(row, technology='LTE'):
         'cell_range_format_km': fmt_km,
         'preambles_per_root': p['preambles_per_root'],
         'roots_needed': p['roots_needed'],
-        'cell_range_exceeded': p['cell_range_exceeded']}
+        'cell_range_exceeded': p['cell_range_exceeded'],
+        'cell_range_exceeds_format': exceeds_format}
 
 # ============================================================
 # Neighbor Discovery
@@ -2797,9 +2892,15 @@ def _pci_is_clean_ex(pci_candidate, cell_id, neighbors, pci_map,
 
 def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
                   technology='LTE', cell_to_sector=None, nzc_map=None,
-                  carrier_map=None):
+                  carrier_map=None, restricted_map=None):
     """Return True if rsi_candidate causes NO RSI overlap for cell_id.
-       Skips co-sector neighbours.
+
+    Skips co-sector neighbours and other carriers.  Same rules as
+    detect_rsi_collisions: roots are compared in the cell's own root space
+    (838 for L=839, 138 for L=139 — v3 used 838 for both), a neighbour with a
+    different L_RA cannot clash, and restricted cells reserve the roots of
+    their actual start (restricted_map: cell -> False / 'typeA' / 'typeB').
+    A candidate outside the cell's root space (>137 for L=139) is never clean.
     """
     technology = norm_tech(technology)  # UI = tek otorite
     if cell_to_sector is None:
@@ -2808,9 +2909,14 @@ def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
         nzc_map = {}
     if carrier_map is None:
         carrier_map = {}
+    if restricted_map is None:
+        restricted_map = {}
     my_sector = cell_to_sector.get(str(cell_id))
-    mx = rsi_count(technology)
     cell_nzc = nzc_map.get(str(cell_id), NZC_LONG)
+    mine = cell_root_set(rsi_candidate, cell_ncs, cell_nzc,
+                         restricted_map.get(str(cell_id), False), candidate=True)
+    if mine is None:
+        return False
     for nb in neighbors.get(cell_id, set()):
         if my_sector is not None and cell_to_sector.get(str(nb)) == my_sector:
             continue
@@ -2819,13 +2925,38 @@ def _rsi_is_clean(rsi_candidate, cell_ncs, cell_id, neighbors, rsi_map, ncs_map,
         nb_rsi = rsi_map.get(nb)
         if nb_rsi is None or pd.isna(nb_rsi):
             continue
-        nb_ncs = ncs_map.get(nb, 13)
         nb_nzc = nzc_map.get(str(nb), NZC_LONG)
-        overlap_nzc = max(cell_nzc, nb_nzc)
-        if rsi_overlap(rsi_candidate, cell_ncs, int(nb_rsi), nb_ncs,
-                       overlap_nzc, 64, mx):
+        if nb_nzc != cell_nzc:
+            continue  # different L_RA -> different root space, cannot clash
+        theirs = cell_root_set(int(nb_rsi), ncs_map.get(nb, 13), nb_nzc,
+                               restricted_map.get(str(nb), False))
+        if theirs and (mine & theirs):
             return False
     return True
+
+
+def _same_lra_group(cell_id, sector_groups, cell_to_sector, nzc_map):
+    """`cell_id` plus its co-sector cells with the same L_RA — the cells that
+    share one RSI.  A long and a short cell in one sector cannot share it."""
+    sec = cell_to_sector.get(str(cell_id)) if cell_to_sector else None
+    nz = nzc_map.get(str(cell_id), NZC_LONG)
+    co = [str(c) for c in (sector_groups or {}).get(sec, []) if str(c) != str(cell_id)]
+    return [str(cell_id)] + [c for c in co if nzc_map.get(c, NZC_LONG) == nz]
+
+
+def _rsi_is_clean_for_group(rsi_candidate, group, neighbors, rsi_map, ncs_map,
+                            technology, cell_to_sector, nzc_map, carrier_map,
+                            restricted_map):
+    """A sector's RSI is copied to every cell of `group`, so it must be clean
+    on every one of their carriers — not just on the leader's.  v3 checked the
+    leader only; on the real Samsun network that left 5 new collisions on the
+    carrier the copy went to."""
+    return all(
+        _rsi_is_clean(rsi_candidate, ncs_map.get(m, 13), m, neighbors, rsi_map,
+                      ncs_map, technology, cell_to_sector=cell_to_sector,
+                      nzc_map=nzc_map, carrier_map=carrier_map,
+                      restricted_map=restricted_map)
+        for m in group)
 
 
 def suggest_pci(df, neighbors, results, technology='LTE',
@@ -3327,6 +3458,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
     rsi_map = {}
     ncs_map = {}
     nzc_map = {}
+    restricted_map = {}
     for _, r in existing_df.iterrows():
         cid = str(r['cell_id'])
         rv = r.get('rsi')
@@ -3335,6 +3467,15 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
         _p = _prach_params(r, technology)
         nzc_map[cid] = _p['nzc']
         ncs_map[cid] = _p['ncs']
+        restricted_map[cid] = _p['restricted']
+    # New cells too, up front: a new cell's same-L_RA co-sector group can
+    # contain other new cells that have not been processed yet.
+    for _, r in new_cells_df.iterrows():
+        cid = str(r['cell_id'])
+        _p = _prach_params(r, technology)
+        nzc_map[cid] = _p['nzc']
+        ncs_map[cid] = _p['ncs']
+        restricted_map[cid] = _p['restricted']
 
     # Normalize neighbours to strings
     neighbors = {str(k): {str(v) for v in vs} for k, vs in nb_all.items()}
@@ -3362,6 +3503,7 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
     # Working maps (so earlier new cell assignments propagate)
     working_pci = dict(pci_map)
     working_rsi = dict(rsi_map)
+    _rsi_from_leader = set()   # new cells whose RSI came from a co-sector new cell
 
     for _, new_row in new_cells_df.iterrows():
         cid = str(new_row['cell_id'])
@@ -3454,18 +3596,31 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                 break
 
         # --- RSI: find optimal clean RSI ---
+        # The group is this cell plus its same-L_RA co-sector cells that are
+        # also NEW.  Existing co-sector cells are not in the output, so the
+        # search must not pretend they move.
+        rsi_group = [c for c in _same_lra_group(cid, sector_groups, cell_to_sector, nzc_map)
+                     if c == cid or c in new_ids]
         found_rsi = None
-        for rsi_cand in range(0, max_rsi):
-            if _rsi_is_clean(rsi_cand, cell_ncs, cid, neighbors,
-                             working_rsi, ncs_map, technology,
-                             cell_to_sector=cell_to_sector, nzc_map=nzc_map,
-                         carrier_map=carrier_map):
-                found_rsi = rsi_cand
-                break
+        if cid in _rsi_from_leader:
+            # Already given by an earlier new cell of the same sector, and
+            # checked clean for this cell then.
+            found_rsi = working_rsi.get(cid)
+        else:
+            for rsi_cand in range(0, root_space_size(cell_nzc)):
+                if _rsi_is_clean_for_group(rsi_cand, rsi_group, neighbors,
+                                           working_rsi, ncs_map, technology,
+                                           cell_to_sector, nzc_map, carrier_map,
+                                           restricted_map):
+                    found_rsi = rsi_cand
+                    break
 
         # Store results
         pss, sss = decompose_pci(found_pci) if found_pci is not None else ('—', '—')
-        rsi_range = (f"{found_rsi}-{(found_rsi + cell_rn - 1) % max_rsi}"
+        if found_rsi is not None:
+            cell_rn = cell_root_count(found_rsi, cell_ncs, cell_nzc,
+                                      restricted_map.get(cid, False))
+        rsi_range = (f"{found_rsi}-{(found_rsi + cell_rn - 1) % root_space_size(cell_nzc)}"
                      if found_rsi is not None else '—')
 
         results.append({
@@ -3498,12 +3653,11 @@ def find_optimal_pci_rsi_for_new_cells(existing_df, new_cells_df, radius_km,
                         working_pci[co_cell] = found_pci
         if found_rsi is not None:
             working_rsi[cid] = found_rsi
-            # Propagate same RSI to co-sector cells
-            sec_key = cell_to_sector.get(cid)
-            if sec_key:
-                for co_cell in sector_groups.get(sec_key, []):
-                    if co_cell != cid:
-                        working_rsi[co_cell] = found_rsi
+            # Same RSI for the new same-L_RA co-sector cells (checked clean above)
+            for co_cell in rsi_group[1:]:
+                if co_cell not in _rsi_from_leader:
+                    working_rsi[co_cell] = found_rsi
+                    _rsi_from_leader.add(co_cell)
 
     _out = pd.DataFrame(results)
     if not _out.empty and 'suggested_pci' in _out.columns:
@@ -3560,6 +3714,7 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
     rsi_map = {}
     ncs_map = {}
     nzc_map = {}
+    restricted_map = {}
     for _, r in df.iterrows():
         cid = str(r['cell_id'])
         pv = r.get('pci')
@@ -3571,6 +3726,7 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
         _p = _prach_params(r, technology)
         nzc_map[cid] = _p['nzc']
         ncs_map[cid] = _p['ncs']
+        restricted_map[cid] = _p['restricted']
 
     # Normalize neighbours to strings
     str_neighbors = {str(k): {str(v) for v in vs} for k, vs in neighbors.items()}
@@ -3764,12 +3920,15 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                     if co_cell != cid and co_cell in working_rsi:
                         saved_co_rsi[co_cell] = working_rsi.pop(co_cell)
 
+            # Same RSI goes to the same-L_RA co-sector cells, so it has to be
+            # clean on all of their carriers; stay inside this cell's root space.
+            rsi_group = _same_lra_group(cid, sector_groups, cell_to_sector, nzc_map)
             found_rsi = None
-            for rsi_cand in range(0, max_rsi):
-                if _rsi_is_clean(rsi_cand, cell_ncs, cid, str_neighbors,
-                                 working_rsi, ncs_map, technology,
-                                 cell_to_sector=cell_to_sector, nzc_map=nzc_map,
-                         carrier_map=carrier_map):
+            for rsi_cand in range(0, root_space_size(cell_nzc)):
+                if _rsi_is_clean_for_group(rsi_cand, rsi_group, str_neighbors,
+                                           working_rsi, ncs_map, technology,
+                                           cell_to_sector, nzc_map, carrier_map,
+                                           restricted_map):
                     found_rsi = rsi_cand
                     break
 
@@ -3778,17 +3937,16 @@ def rescan_pci_rsi_for_cells(df, neighbors, target_cell_ids,
                 rsi_info = 'Bulunamadı (mevcut korundu)'
             else:
                 rsi_changed = (found_rsi != saved_rsi)
-                rn = roots_needed(64, cell_ncs, cell_nzc)
+                rn = cell_root_count(found_rsi, cell_ncs, cell_nzc,
+                                     restricted_map.get(cid, False))
                 rsi_info = f"RSI {found_rsi}, {rn} root"
 
             for co_cell, co_val in saved_co_rsi.items():
                 working_rsi[co_cell] = co_val
             if found_rsi is not None:
                 working_rsi[cid] = found_rsi
-                if my_sector:
-                    for co_cell in sector_groups.get(my_sector, []):
-                        if co_cell != cid:
-                            working_rsi[co_cell] = found_rsi
+                for co_cell in rsi_group[1:]:
+                    working_rsi[co_cell] = found_rsi
 
         pss, sss = decompose_pci(found_pci) if found_pci is not None else ('—', '—')
         results_list.append({
@@ -3846,12 +4004,21 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
     ncs_map = {}
     nzc_map = {}
     tseq_map = {}
+    restricted_map = {}
     for _, r in df.iterrows():
         cid = str(r['cell_id'])
         _p = _prach_params(r, technology)
         nzc_map[cid] = _p['nzc']
         ncs_map[cid] = _p['ncs']
         tseq_map[cid] = _p['tseq_us']
+        restricted_map[cid] = _p['restricted']
+
+    def _rng(start, cid):
+        """'a-b' root range of `cid` from `start`, wrapped in its own root space."""
+        rn = cell_root_count(start, ncs_map.get(cid, 13), nzc_map.get(cid, NZC_LONG),
+                             restricted_map.get(cid, False))
+        mx = root_space_size(nzc_map.get(cid, NZC_LONG))
+        return rn, f"{start}-{(start + (rn or 1) - 1) % mx}"
 
     # Collect problem cells
     problem_cells: Dict[str, list] = defaultdict(list)
@@ -3877,28 +4044,31 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
         cur = int(cur)
         cell_ncs = ncs_map.get(cell_id, 13)
         cell_nzc = nzc_map.get(cell_id, NZC_LONG)
-        rn = roots_needed(64, cell_ncs, cell_nzc)
+        rn, cur_range = _rng(cur, cell_id)
 
         # Already clean after earlier fix?
         if _rsi_is_clean(cur, cell_ncs, cell_id, neighbors, working_rsi, ncs_map, technology,
                          cell_to_sector=cell_to_sector, nzc_map=nzc_map,
-                         carrier_map=carrier_map):
+                         carrier_map=carrier_map, restricted_map=restricted_map):
             continue
 
-        # Try RSI values starting from 0, skip current
+        # The RSI goes to every same-L_RA cell of the sector, so it must be
+        # clean for all of them.  Candidates stay inside this cell's root
+        # space (0-137 for L=139).
+        group = [c for c in _same_lra_group(cell_id, sector_groups, cell_to_sector, nzc_map)
+                 if c == cell_id or c in nzc_map]
         found = None
-        for candidate in range(0, max_rsi):
+        for candidate in range(0, root_space_size(cell_nzc)):
             if candidate == cur:
                 continue
-            if _rsi_is_clean(candidate, cell_ncs, cell_id, neighbors,
-                             working_rsi, ncs_map, technology,
-                             cell_to_sector=cell_to_sector, nzc_map=nzc_map,
-                         carrier_map=carrier_map):
+            if _rsi_is_clean_for_group(candidate, group, neighbors, working_rsi,
+                                       ncs_map, technology, cell_to_sector,
+                                       nzc_map, carrier_map, restricted_map):
                 found = candidate
                 break
 
         if found is not None:
-            new_rn = roots_needed(64, cell_ncs, cell_nzc)
+            new_rn, new_range = _rng(found, cell_id)
             _tseq = tseq_map.get(cell_id, 800.0)
             _cr = round(cell_range_from_ncs(cell_ncs, cell_nzc, _tseq), 2)
             suggestions.append({
@@ -3908,39 +4078,36 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
                 'ncs': cell_ncs,
                 'roots_needed': new_rn,
                 'cell_range_km': _cr,
-                'current_root_range': f"{cur}-{(cur+rn-1)%max_rsi}",
-                'suggested_root_range': f"{found}-{(found+new_rn-1)%max_rsi}",
+                'current_root_range': cur_range,
+                'suggested_root_range': new_range,
                 'conflicting_with': ', '.join(conflicting),
                 'reason': f"RSI {cur}→{found}: root aralığı çakışma yok"
             })
             working_rsi[cell_id] = found  # propagate
-            # Propagate same RSI to co-sector cells
-            sec_key = cell_to_sector.get(cell_id)
-            if sec_key:
-                for co_cell in sector_groups.get(sec_key, []):
-                    if co_cell != cell_id:
-                        working_rsi[co_cell] = found
-                        _rsi_co_sector_fixed.add(co_cell)
-                        # Add suggestion row for co-sector cell
-                        co_cur_rsi = rsi_map.get(co_cell)
-                        co_cur_v = int(co_cur_rsi) if co_cur_rsi is not None and not pd.isna(co_cur_rsi) else None
-                        co_ncs = ncs_map.get(co_cell, 13)
-                        co_nzc = nzc_map.get(co_cell, NZC_LONG)
-                        co_rn = roots_needed(64, co_ncs, co_nzc)
-                        co_tseq = tseq_map.get(co_cell, 800.0)
-                        co_cr = round(cell_range_from_ncs(co_ncs, co_nzc, co_tseq), 2)
-                        suggestions.append({
-                            'cell_id': co_cell,
-                            'current_rsi': co_cur_v if co_cur_v is not None else '—',
-                            'suggested_rsi': found,
-                            'ncs': co_ncs,
-                            'roots_needed': co_rn,
-                            'cell_range_km': co_cr,
-                            'current_root_range': f"{co_cur_v}-{(co_cur_v+co_rn-1)%max_rsi}" if co_cur_v is not None else '—',
-                            'suggested_root_range': f"{found}-{(found+co_rn-1)%max_rsi}",
-                            'conflicting_with': ', '.join(problem_cells.get(co_cell, conflicting)),
-                            'reason': f"Sektör lideri {cell_id} ile aynı RSI: {found}"
-                        })
+            # Propagate the same RSI to the same-L_RA co-sector cells
+            for co_cell in group[1:]:
+                working_rsi[co_cell] = found
+                _rsi_co_sector_fixed.add(co_cell)
+                # Add suggestion row for co-sector cell
+                co_cur_rsi = rsi_map.get(co_cell)
+                co_cur_v = int(co_cur_rsi) if co_cur_rsi is not None and not pd.isna(co_cur_rsi) else None
+                co_ncs = ncs_map.get(co_cell, 13)
+                co_nzc = nzc_map.get(co_cell, NZC_LONG)
+                co_rn, co_new_range = _rng(found, co_cell)
+                co_tseq = tseq_map.get(co_cell, 800.0)
+                co_cr = round(cell_range_from_ncs(co_ncs, co_nzc, co_tseq), 2)
+                suggestions.append({
+                    'cell_id': co_cell,
+                    'current_rsi': co_cur_v if co_cur_v is not None else '—',
+                    'suggested_rsi': found,
+                    'ncs': co_ncs,
+                    'roots_needed': co_rn,
+                    'cell_range_km': co_cr,
+                    'current_root_range': _rng(co_cur_v, co_cell)[1] if co_cur_v is not None else '—',
+                    'suggested_root_range': co_new_range,
+                    'conflicting_with': ', '.join(problem_cells.get(co_cell, conflicting)),
+                    'reason': f"Sektör lideri {cell_id} ile aynı RSI: {found}"
+                })
         else:
             _tseq = tseq_map.get(cell_id, 800.0)
             _cr = round(cell_range_from_ncs(cell_ncs, cell_nzc, _tseq), 2)
@@ -3951,7 +4118,7 @@ def suggest_rsi(df, neighbors, results, technology='LTE',
                 'ncs': cell_ncs,
                 'roots_needed': rn,
                 'cell_range_km': _cr,
-                'current_root_range': f"{cur}-{(cur+rn-1)%max_rsi}",
+                'current_root_range': cur_range,
                 'suggested_root_range': '—',
                 'conflicting_with': ', '.join(conflicting),
                 'reason': 'Uygun RSI bulunamadı'
@@ -4019,22 +4186,29 @@ def plan_rsi_network(df, neighbors, technology='LTE',
                            and not pd.isna(_cur_rsi_raw) else None)
         is_short = _p['is_short']
         nzc = _p['nzc']
-        ncs = _p['ncs']
-        if ncs == 0:
-            ncs = 13  # fallback: can't have Ncs=0 for planning
+        ncs_raw = _p['ncs']
+        ncs = ncs_raw if ncs_raw else 13  # display fallback; Ncs=0 -> 64 roots below
         tseq = _p['tseq_us']
-        # Restricted-set cells consume far more roots than the unrestricted
-        # formula suggests; reserve accordingly (K-2).
+        # Unrestricted: the root count is a constant of the cell.  Restricted
+        # (high-speed): it depends on the START index, so this is only the
+        # count at the current RSI and is used for ordering; what a cell
+        # actually reserves is computed at each candidate start by _rn_at()
+        # (K-2).  v3 used to reserve the current-RSI count at the new RSI and
+        # left collisions in its own plan.
         rn = _p['roots_needed'] or roots_needed(64, ncs, nzc)
         cr_km = cell_range_from_ncs(ncs, nzc, tseq)
-        # Per-cell max_rsi: L=139 → max 138, L=839 → max 838
+        # Number of logical root indices = wrap modulus: 838 (L=839) / 138 (L=139)
         cell_max_rsi = (NZC_SHORT - 1) if is_short else max_rsi
         cur_rsi = row.get('rsi')
+        _rs = _p['restricted']
         cell_info[cid] = {
-            'ncs': ncs, 'nzc': nzc, 'roots_needed': rn, 'cell_range_km': round(cr_km, 2),
+            'ncs': ncs, 'ncs_raw': ncs_raw, 'nzc': nzc, 'roots_needed': rn,
+            'cell_range_km': round(cr_km, 2),
             'current_rsi': int(cur_rsi) if pd.notna(cur_rsi) else None,
             'degree': len(neighbors.get(cid, set())),
-            'max_rsi': cell_max_rsi
+            'max_rsi': cell_max_rsi,
+            'restricted': bool(_rs),
+            'set_type': 'B' if _rs and str(_rs).upper().endswith('B') else 'A',
         }
 
     # Sort: highest roots_needed first, then highest neighbor-degree
@@ -4042,14 +4216,47 @@ def plan_rsi_network(df, neighbors, technology='LTE',
                           key=lambda c: (-cell_info[c]['roots_needed'],
                                          -cell_info[c]['degree']))
 
-    # Greedy assignment
-    assigned = {}  # cell_id → rsi
+    assigned = {}      # cell_id -> start RSI
+    assigned_rn = {}   # cell_id -> roots consumed FROM that start
 
     # Build reverse sector lookup: cell → list of co-sector cells
     _sector_members_rsi = {}  # cell_id → [all cells in same sector]
     for sk, members in sector_groups.items():
         for m in members:
             _sector_members_rsi[m] = list(members)
+
+    def _rsi_group(cid):
+        """Cells that take the same RSI as `cid`: its co-sector cells with the
+        same L_RA.  A long (L=839) and a short (L=139) cell in one sector live
+        in different root spaces (0-837 vs 0-137) and cannot share an RSI —
+        v3 used to copy a long cell's RSI onto its short co-sector cell and
+        wrote values above 137."""
+        nz = cell_info[cid]['nzc']
+        return [m for m in _sector_members_rsi.get(cid, [cid])
+                if m in cell_info and cell_info[m]['nzc'] == nz] or [cid]
+
+    _rn_cache = {}
+
+    def _rn_at(cid, start):
+        """Roots `cid` consumes when it starts at `start` (None = cannot reach 64)."""
+        info = cell_info[cid]
+        if not info['restricted']:
+            return info['roots_needed']
+        key = (info['ncs_raw'], info['nzc'], info['set_type'], start)
+        if key not in _rn_cache:
+            _rn_cache[key] = roots_needed_for_cell(
+                start, info['ncs_raw'], info['nzc'], restricted=True,
+                set_type=info['set_type'])
+        return _rn_cache[key]
+
+    def _group_rn_at(group, start):
+        best = 0
+        for m in group:
+            r = _rn_at(m, start)
+            if r is None:
+                return None
+            best = max(best, r)
+        return best
 
     # Pre-build neighbor rings ONCE to avoid repeated 2nd-ring traversals
     _nb_ring1 = {}   # cell_id → set of 1st-ring neighbor IDs (excl co-sector)
@@ -4061,7 +4268,7 @@ def plan_rsi_network(df, neighbors, technology='LTE',
             progress_callback(int(_pre_idx / _prebuild_total * 25),
                               f'Komşuluk haritası kuruluyor… {_pre_idx}/{_prebuild_total}')
         _my_sec = cell_to_sector.get(str(_pre_cid))
-        _check_cells = _sector_members_rsi.get(_pre_cid, [_pre_cid])
+        _check_cells = _rsi_group(_pre_cid)
         _r1 = set()
         _r2 = set()
         for _src in _check_cells:
@@ -4081,41 +4288,56 @@ def plan_rsi_network(df, neighbors, technology='LTE',
         _nb_ring2[_pre_cid] = _r2
 
     def _occupied_roots(cell_id, include_2nd_ring=True):
-        """Return set of root indices occupied by assigned neighbors.
-        Uses pre-built ring lookups — O(ring_size × roots_needed)."""
-        occ = set()
-        for nb_id in _nb_ring1.get(cell_id, set()):
-            nb_rsi = assigned.get(nb_id)
-            if nb_rsi is None:
-                continue
-            nb_rn = cell_info.get(nb_id, {}).get('roots_needed', 1)
-            for i in range(nb_rn):
-                occ.add((nb_rsi + i) % max_rsi)
+        """Root indices used by assigned neighbours in the same root space.
+        A neighbour with a different L_RA cannot clash (detect_rsi_collisions
+        skips such pairs too), so it does not constrain this cell."""
+        my_nzc = cell_info.get(cell_id, {}).get('nzc', NZC_LONG)
+        rings = [_nb_ring1.get(cell_id, set())]
         if include_2nd_ring:
-            for nb2_id in _nb_ring2.get(cell_id, set()):
-                nb2_rsi = assigned.get(nb2_id)
-                if nb2_rsi is None:
+            rings.append(_nb_ring2.get(cell_id, set()))
+        occ = set()
+        for ring in rings:
+            for nb_id in ring:
+                nb_rsi = assigned.get(nb_id)
+                if nb_rsi is None:
                     continue
-                nb2_rn = cell_info.get(nb2_id, {}).get('roots_needed', 1)
-                for i in range(nb2_rn):
-                    occ.add((nb2_rsi + i) % max_rsi)
+                nb_info = cell_info.get(nb_id, {})
+                if nb_info.get('nzc', NZC_LONG) != my_nzc:
+                    continue
+                nb_rn = assigned_rn.get(nb_id, nb_info.get('roots_needed', 1))
+                nb_mx = nb_info.get('max_rsi', max_rsi)
+                for i in range(nb_rn):
+                    occ.add((nb_rsi + i) % nb_mx)
         return occ
 
-    def _find_free_rsi(occupied, rn, cell_mx):
-        """Find the lowest RSI where [RSI..RSI+rn) doesn't overlap occupied.
-        Uses forbidden-start set — avoids creating a set per candidate."""
-        if not occupied:
-            return 0
-        # Build set of forbidden start positions
-        forbidden = set()
-        for r in occupied:
-            for k in range(rn):
-                forbidden.add((r - k) % cell_mx)
-        # Find first non-forbidden
+    def _find_free_rsi(occupied, group, cell_mx):
+        """Lowest start whose whole root range, for every cell of `group`,
+        misses `occupied`.  Returns (start, roots) or (None, None)."""
+        if not any(cell_info[m]['restricted'] for m in group):
+            rn = max(cell_info[m]['roots_needed'] for m in group)
+            if not occupied:
+                return 0, rn
+            forbidden = set()
+            for r in occupied:
+                for k in range(rn):
+                    forbidden.add((r - k) % cell_mx)
+            for c in range(cell_mx):
+                if c not in forbidden:
+                    return c, rn
+            return None, None
+        # Restricted: the reservation depends on the start, walk the candidates.
         for c in range(cell_mx):
-            if c not in forbidden:
-                return c
-        return None  # all slots full
+            rn = _group_rn_at(group, c)
+            if rn is None or rn > cell_mx:
+                continue
+            if all(((c + i) % cell_mx) not in occupied for i in range(rn)):
+                return c, rn
+        return None, None
+
+    def _assign(group, start):
+        for m in group:
+            assigned[m] = start
+            assigned_rn[m] = _rn_at(m, start)
 
     already_assigned_by_sector = set()  # cells assigned via sector propagation
     _rsi_total = len(sorted_cells)
@@ -4129,32 +4351,19 @@ def plan_rsi_network(df, neighbors, technology='LTE',
         if cid in already_assigned_by_sector:
             continue
 
-        info = cell_info[cid]
-        rn = info['roots_needed']
-        cell_max_rsi = info.get('max_rsi', max_rsi)
-        occupied = _occupied_roots(cid)
+        group = [cid] + [m for m in _rsi_group(cid) if m != cid and m not in assigned]
+        cell_max_rsi = cell_info[cid].get('max_rsi', max_rsi)
 
-        found = _find_free_rsi(occupied, rn, cell_max_rsi)
-
-        if found is not None:
-            assigned[cid] = found
-        else:
+        found, _ = _find_free_rsi(_occupied_roots(cid), group, cell_max_rsi)
+        if found is None:
             # Fallback: relax 2nd-ring constraint (still sector-aware)
-            occ_1st = _occupied_roots(cid, include_2nd_ring=False)
-            found = _find_free_rsi(occ_1st, rn, cell_max_rsi)
-            if found is not None:
-                assigned[cid] = found
-            else:
-                assigned[cid] = None
-
-        # Propagate same RSI to co-sector cells
-        if assigned.get(cid) is not None:
-            sec_key = cell_to_sector.get(cid)
-            if sec_key:
-                for co_cell in sector_groups.get(sec_key, []):
-                    if co_cell != cid and co_cell not in assigned:
-                        assigned[co_cell] = assigned[cid]
-                        already_assigned_by_sector.add(co_cell)
+            found, _ = _find_free_rsi(_occupied_roots(cid, include_2nd_ring=False),
+                                      group, cell_max_rsi)
+        if found is None:
+            assigned[cid] = None
+            continue
+        _assign(group, found)
+        already_assigned_by_sector.update(m for m in group if m != cid)
 
     # ------------------------------------------------------------------
     # RSI Repair Pass: detect remaining overlaps and fix them
@@ -4163,22 +4372,21 @@ def plan_rsi_network(df, neighbors, technology='LTE',
     if progress_callback:
         progress_callback(85, 'RSI onarım geçişi…')
 
+    def _root_set(cid):
+        start = assigned.get(cid)
+        if start is None:
+            return set()
+        info = cell_info[cid]
+        rn = assigned_rn.get(cid, info['roots_needed'])
+        return {(start + i) % info.get('max_rsi', max_rsi) for i in range(rn)}
+
     def _has_rsi_overlap(cid_a, cid_b):
-        """Check if two cells have RSI root-sequence overlap."""
-        ra, rb = assigned.get(cid_a), assigned.get(cid_b)
-        if ra is None or rb is None:
+        """Do two assigned cells share a root, in the same root space?"""
+        if assigned.get(cid_a) is None or assigned.get(cid_b) is None:
             return False
-        ncs_a = cell_info.get(cid_a, {}).get('ncs', 13)
-        ncs_b = cell_info.get(cid_b, {}).get('ncs', 13)
-        nzc_a = cell_info.get(cid_a, {}).get('nzc', NZC_LONG)
-        nzc_b = cell_info.get(cid_b, {}).get('nzc', NZC_LONG)
-        rn_a = roots_needed(64, ncs_a, nzc_a)
-        rn_b = roots_needed(64, ncs_b, nzc_b)
-        overlap_nzc = max(nzc_a, nzc_b)
-        pair_mx = max(
-            cell_info.get(cid_a, {}).get('max_rsi', max_rsi),
-            cell_info.get(cid_b, {}).get('max_rsi', max_rsi))
-        return rsi_overlap(ra, ncs_a, rb, ncs_b, overlap_nzc, 64, pair_mx)
+        if cell_info.get(cid_a, {}).get('nzc') != cell_info.get(cid_b, {}).get('nzc'):
+            return False
+        return bool(_root_set(cid_a) & _root_set(cid_b))
 
     for _repair_pass in range(5):
         # Detect remaining RSI overlaps among 1st-ring neighbors
@@ -4216,34 +4424,27 @@ def plan_rsi_network(df, neighbors, technology='LTE',
             deg_b = cell_info.get(vb, {}).get('degree', 0)
             to_fix = vb if deg_b <= deg_a else va
 
-            # Get sector leader if propagated
-            sec_key = cell_to_sector.get(to_fix)
-            fix_group = [to_fix]
-            if sec_key:
-                fix_group = [c for c in sector_groups.get(sec_key, [to_fix])
-                             if c in cell_info]
-
-            # Pick the first cell as representative for occupied-roots
+            # The whole same-L_RA sector group moves together
+            fix_group = _rsi_group(to_fix)
             rep = fix_group[0]
-            rn = cell_info[rep]['roots_needed']
             cell_mx = cell_info[rep].get('max_rsi', max_rsi)
 
             # Temporarily remove current assignment to avoid self-blocking
-            old_rsis = {}
+            old = {fc: (assigned.get(fc), assigned_rn.get(fc)) for fc in fix_group}
             for fc in fix_group:
-                old_rsis[fc] = assigned.get(fc)
                 assigned[fc] = None
 
             occ = _occupied_roots(rep, include_2nd_ring=False)
-            found = _find_free_rsi(occ, rn, cell_mx)
+            found, _ = _find_free_rsi(occ, fix_group, cell_mx)
 
             if found is not None:
-                for fc in fix_group:
-                    assigned[fc] = found
+                _assign(fix_group, found)
             else:
                 # Restore old assignment (couldn't improve)
                 for fc in fix_group:
-                    assigned[fc] = old_rsis[fc]
+                    assigned[fc] = old[fc][0]
+                    if old[fc][1] is not None:
+                        assigned_rn[fc] = old[fc][1]
 
     # Also try to assign RSI for cells that got None
     if progress_callback:
@@ -4251,25 +4452,20 @@ def plan_rsi_network(df, neighbors, technology='LTE',
     for cid in sorted_cells:
         if assigned.get(cid) is not None:
             continue
-        rn = cell_info[cid]['roots_needed']
+        group = [cid] + [m for m in _rsi_group(cid) if m != cid and assigned.get(m) is None]
         cell_mx = cell_info[cid].get('max_rsi', max_rsi)
         occ = _occupied_roots(cid, include_2nd_ring=False)
-        found = _find_free_rsi(occ, rn, cell_mx)
+        found, _ = _find_free_rsi(occ, group, cell_mx)
         if found is not None:
-            assigned[cid] = found
-            # Propagate to sector
-            sec_key = cell_to_sector.get(cid)
-            if sec_key:
-                for co_cell in sector_groups.get(sec_key, []):
-                    if co_cell != cid and assigned.get(co_cell) is None:
-                        assigned[co_cell] = found
+            _assign(group, found)
 
     # Build result table
     rows = []
     for cid in sorted_cells:
         info = cell_info[cid]
         planned = assigned.get(cid)
-        rn = info['roots_needed']
+        rn = (assigned_rn.get(cid, info['roots_needed']) if planned is not None
+              else info['roots_needed'])
         cur = info['current_rsi']
         cell_mx = info.get('max_rsi', max_rsi)
         changed = (planned != cur) if (planned is not None and cur is not None) else True
